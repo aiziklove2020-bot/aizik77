@@ -139,16 +139,25 @@
 
       window.fbSubscribeToRoom = (roomName, callback) => {
         log('👂 מאזין להודעות בחדר: "' + roomName + '"', 'info');
+        // NOTE: We intentionally do NOT use orderBy() here because that would
+        // require a composite index. Instead we fetch by room only and sort
+        // client-side. This keeps Firestore happy with a single-field index
+        // (which is automatic).
         const q = query(
           collection(db, 'chatMessages'),
           where('room', '==', roomName),
-          orderBy('createdAt', 'asc'),
           limit(200)
         );
         return onSnapshot(q, (snapshot) => {
           const msgs = snapshot.docs.map(d => {
             const data = d.data();
             return Object.assign({}, data, { _firestoreId: d.id });
+          });
+          // Sort oldest → newest by createdAt timestamp (missing values go last)
+          msgs.sort((a, b) => {
+            const aT = a.createdAt && a.createdAt.seconds ? a.createdAt.seconds : 0;
+            const bT = b.createdAt && b.createdAt.seconds ? b.createdAt.seconds : 0;
+            return aT - bT;
           });
           log('📥 קיבלתי ' + msgs.length + ' הודעות מהחדר "' + roomName + '"', 'ok');
           callback(msgs);
