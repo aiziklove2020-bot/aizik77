@@ -1,0 +1,28 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // הודעות הצ'אט
+    match /messages/{messageId} {
+      // כל מי שמחובר (כולל אנונימית) יכול לקרוא
+      allow read: if request.auth != null;
+
+      // יצירת הודעה: חייב להיות מחובר, הטקסט לא ריק ולא ארוך מדי,
+      // ויש שדות חובה (room, text, user)
+      allow create: if request.auth != null
+                    && request.resource.data.text is string
+                    && request.resource.data.text.size() > 0
+                    && request.resource.data.text.size() < 2000
+                    && request.resource.data.room is string
+                    && request.resource.data.room.size() < 100;
+
+      // מחיקה: כל משתמש מחובר יכול למחוק
+      // (הקוד עצמו מגביל את זה רק לאדמין במסך; חוק חזק יותר לעתיד לאחר שיש לנו
+      // collection של admins בבסיס הנתונים)
+      allow delete: if request.auth != null;
+
+      // לא מאפשרים עריכה של הודעות קיימות
+      allow update: if false;
+    }
+  }
+}

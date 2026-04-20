@@ -1,34 +1,49 @@
-# BDSM Chat
+# BDSM Chat (עם Firebase)
 
-צ'אט בעברית הפועל ישירות בדפדפן ללא צורך בהתקנה או build.
+צ'אט בזמן אמת בעברית המחובר ל-Firebase. כל ההודעות נשמרות בענן ומשתמשים שונים רואים אחד את השני בזמן אמת.
 
-## קבצים
+## קבצים בפרויקט
 
 - **`index.html`** - הצ'אט המלא (קובץ אחד)
-- **`vercel.json`** - הגדרות פריסה ל-Vercel (מגדיר שזה אתר סטטי)
+- **`vercel.json`** - הגדרות פריסה ל-Vercel
+- **`firestore.rules`** - חוקי אבטחה ל-Firestore (צריך להעתיק ל-Firebase Console)
 - **`README.md`** - הקובץ הזה
 
-## העלאה ל-Vercel דרך GitHub
+## הגדרות חובה ב-Firebase Console
 
-1. פתח את ה-repository שלך ב-GitHub
-2. **מחק את כל הקבצים הישנים** (במיוחד `package.json`, `App.jsx`, `firebase-config.js` - כולם מיותרים!)
-3. העלה את **שלושת הקבצים** האלה לשורש ה-repo: `index.html`, `vercel.json`, `README.md`
-4. חכה 30-60 שניות ש-Vercel יפרוס מחדש
-5. פתח את כתובת ה-Vercel שלך
+לפני שהאתר יעבוד, צריך 4 הגדרות חד-פעמיות:
 
-## פרטי התחברות לבדיקה
+### 1. הפעל Firestore
+- https://console.firebase.google.com/project/tbdsm-5acca/firestore
+- לחץ "Create database" → "Start in test mode" → location: eur3 → Enable
 
-- **מנהל:** `admin` / `2109`
-- **משתמש רגיל:** `demo` / `demo`
-- או לחץ "כניסה כאורח"
+### 2. הפעל Authentication (Anonymous)
+- https://console.firebase.google.com/project/tbdsm-5acca/authentication
+- Get started → Sign-in method → Anonymous → Enable → Save
 
-## הערה חשובה
+### 3. הוסף את Vercel כדומיין מורשה
+- באותו מסך של Authentication → Settings → Authorized domains
+- Add domain: `aizik77.vercel.app`
 
-זו גרסה **מקומית** - ההודעות לא נשמרות בין מכשירים או בין רענונים של דפדפן. כל משתמש רואה רק את ההודעות שלו עצמו. כדי שמשתמשים ידברו בזמן אמת בינם לבין עצמם, צריך להוסיף Firebase או שרת backend - זה שלב נוסף.
+### 4. העתק את חוקי האבטחה
+- https://console.firebase.google.com/project/tbdsm-5acca/firestore/rules
+- מחק הכל → הדבק את תוכן `firestore.rules` → Publish
+
+## העלאה ל-Vercel
+
+1. פתח את ה-GitHub repo שלך
+2. מחק את `index.html` הישן
+3. העלה את `index.html`, `vercel.json`, `firestore.rules` ו-`README.md`
+4. Vercel ייפרוס מחדש אוטומטית תוך דקה
+
+## בדיקה
+
+1. פתח את https://aizik77.vercel.app/ בחלון רגיל
+2. פתח את אותו URL בחלון **Incognito/פרטי**
+3. שלח הודעה בחלון אחד - היא תופיע בחלון השני בתוך שנייה!
 
 ## פתרון בעיות
 
-אם רואה מסך שגיאה:
-1. פתח Console בדפדפן (F12 → Console)
-2. צלם את השגיאה באדום
-3. שלח אותה לצ'אט של Claude לאבחון
+- **"permission-denied" ב-Console**: עדכן את חוקי האבטחה ב-Firebase (שלב 4)
+- **לא רואה הודעות של אחרים**: ודא ש-Firestore מופעל ושהוספת את הדומיין למורשים
+- **מסך שגיאה**: פתח F12 → Console → שלח את השגיאה האדומה

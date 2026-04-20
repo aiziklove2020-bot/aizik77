@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>BDSM Chat</title>
 
-  <!-- Tailwind CSS Play CDN (runs in browser, no build needed) -->
+  <!-- Tailwind CSS Play CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
 
   <!-- Hebrew font -->
@@ -32,20 +32,96 @@
     <div class="loader">
       <div class="spinner"></div>
       <div>טוען את הצ'אט...</div>
+      <div style="font-size:13px;color:#666">מתחבר ל-Firebase...</div>
     </div>
   </div>
 
-  <!-- React 18 UMD -->
+  <!-- ======================================== -->
+  <!-- FIREBASE v10 (ES MODULES)                -->
+  <!-- ======================================== -->
+  <script type="module">
+    import { initializeApp }
+      from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
+    import {
+      getAuth, signInAnonymously, onAuthStateChanged
+    } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+    import {
+      getFirestore, collection, addDoc, query, where, orderBy,
+      onSnapshot, serverTimestamp, deleteDoc, doc, limit
+    } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
+
+    // ===== YOUR FIREBASE CONFIG =====
+    const firebaseConfig = {
+      apiKey: "AIzaSyAJv0APn-Qmv59H2Behu3PhskObCaPHW_A",
+      authDomain: "tbdsm-5acca.firebaseapp.com",
+      projectId: "tbdsm-5acca",
+      storageBucket: "tbdsm-5acca.firebasestorage.app",
+      messagingSenderId: "905865425928",
+      appId: "1:905865425928:web:1898ebb5b8de87ecf3cdbd",
+      measurementId: "G-FRE3N3T6JH"
+    };
+
+    // Init
+    const app  = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db   = getFirestore(app);
+
+    // Sign in anonymously so that Firestore security rules that require auth will pass
+    signInAnonymously(auth).catch(err => {
+      console.error('[Firebase] Anonymous sign-in failed:', err);
+      // Not fatal — if rules allow unauthenticated access, chat still works
+    });
+
+    // Expose helpers to the React component via window
+    window.fbSendMessage = async (msg) => {
+      const doc = Object.assign({}, msg, { createdAt: serverTimestamp() });
+      return await addDoc(collection(db, 'messages'), doc);
+    };
+
+    window.fbDeleteMessage = async (firestoreId) => {
+      return await deleteDoc(doc(db, 'messages', firestoreId));
+    };
+
+    window.fbSubscribeToRoom = (roomName, callback) => {
+      // Get last 200 messages for this room, ordered oldest → newest
+      const q = query(
+        collection(db, 'messages'),
+        where('room', '==', roomName),
+        orderBy('createdAt', 'asc'),
+        limit(200)
+      );
+      return onSnapshot(q, (snapshot) => {
+        const msgs = snapshot.docs.map(d => {
+          const data = d.data();
+          return Object.assign({}, data, { _firestoreId: d.id });
+        });
+        callback(msgs);
+      }, (err) => {
+        console.error('[Firebase] Subscription error:', err);
+      });
+    };
+
+    // Signal readiness so the React app knows Firebase is live
+    window.firebaseReady = true;
+    window.dispatchEvent(new Event('firebase-ready'));
+    console.log('[Firebase] Initialized successfully');
+  </script>
+
+  <!-- ======================================== -->
+  <!-- REACT 18 UMD (for the component)         -->
+  <!-- ======================================== -->
   <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
 
-  <!-- Inline icon components (no external icon CDN needed) -->
+  <!-- ======================================== -->
+  <!-- INLINE ICONS (replaces lucide-react)      -->
+  <!-- ======================================== -->
   <script>
     (function() {
       if (typeof window.React === 'undefined' || typeof window.ReactDOM === 'undefined') {
         document.getElementById('root').innerHTML =
           '<div class="error-box"><h2>&#9888;&#65039; React &#1500;&#1488; &#1504;&#1496;&#1506;&#1503;</h2>' +
-          '<p>&#1489;&#1506;&#1497;&#1497;&#1514; &#1495;&#1497;&#1489;&#1493;&#1512; &#1500;&#1488;&#1497;&#1504;&#1496;&#1512;&#1504;&#1496; &#1488;&#1493; &#1513;-CDN &#1495;&#1505;&#1493;&#1501;. &#1504;&#1505;&#1492; &#1500;&#1512;&#1506;&#1504;&#1503; (F5).</p></div>';
+          '<p>&#1489;&#1506;&#1497;&#1497;&#1514; &#1495;&#1497;&#1489;&#1493;&#1512; &#1500;&#1488;&#1497;&#1504;&#1496;&#1512;&#1504;&#1496;. &#1504;&#1505;&#1492; &#1500;&#1512;&#1506;&#1504;&#1503; (F5).</p></div>';
         return;
       }
 
@@ -54,8 +130,8 @@
       window.useRef    = window.React.useRef;
 
       const e = React.createElement;
-      function makeIcon(pathNodes) {
-        return function IconComponent(props) {
+      function makeIcon(paths) {
+        return function Icon(props) {
           const { size = 24, color = 'currentColor', strokeWidth = 2, className, ...rest } = props || {};
           return e('svg', Object.assign({
             xmlns: 'http://www.w3.org/2000/svg',
@@ -63,7 +139,7 @@
             fill: 'none', stroke: color, strokeWidth: strokeWidth,
             strokeLinecap: 'round', strokeLinejoin: 'round',
             className: className
-          }, rest), pathNodes.map(function(n, i) { return e(n[0], Object.assign({ key: i }, n[1])); }));
+          }, rest), paths.map(function(n, i) { return e(n[0], Object.assign({ key: i }, n[1])); }));
         };
       }
 
@@ -151,7 +227,9 @@
     })();
   </script>
 
-  <!-- Pre-compiled component (JSX already converted to plain JS) -->
+  <!-- ======================================== -->
+  <!-- COMPILED COMPONENT                       -->
+  <!-- ======================================== -->
   <script>
 try {
 const BDSMChat = () => {
@@ -329,7 +407,11 @@ const BDSMChat = () => {
     if (currentUser?.role === 'admin') {
       const msg = messages[messageIndex];
       if (window.confirm('האם למחוק הודעה זו?')) {
-        setMessages(messages.filter((_, idx) => idx !== messageIndex));
+        if (msg && msg._firestoreId && typeof window.fbDeleteMessage === 'function') {
+          window.fbDeleteMessage(msg._firestoreId).catch(err => console.error('Delete failed:', err));
+        } else {
+          setMessages(messages.filter((_, idx) => idx !== messageIndex));
+        }
         addAdminLog(`מחק הודעה מ-${msg.user}: "${msg.text.substring(0, 30)}..."`);
       }
     }
@@ -367,25 +449,50 @@ const BDSMChat = () => {
     });
   }, [messages]);
 
-  // AUTO-LOGIN AS GUEST ON MOUNT — no registration required for visitors.
-  // Admin can still log in by pressing the "logout" button to reach the login form.
+  // AUTO-LOGIN AS GUEST ON MOUNT — no registration required.
+  // Each browser gets a persistent random guest identity stored in localStorage
+  // so refresh doesn't create a new ghost user.
   useEffect(() => {
     if (!isLoggedIn) {
-      const guestNumber = Math.floor(Math.random() * 10000);
-      const guestUser = {
-        id: Date.now(),
-        username: 'אורח_' + guestNumber,
-        password: '',
-        role: 'guest',
-        online: true,
-        banned: false
-      };
-      setCurrentUser(guestUser);
-      setIsGuest(true);
+      let storedUser = null;
+      try {
+        const raw = localStorage.getItem('bdsm_chat_user');
+        if (raw) storedUser = JSON.parse(raw);
+      } catch (e) {/* ignore */}
+      if (storedUser && storedUser.id && storedUser.username) {
+        setCurrentUser(storedUser);
+        setIsGuest(storedUser.role === 'guest');
+      } else {
+        const guestNumber = Math.floor(Math.random() * 10000);
+        const guestUser = {
+          id: 'g_' + Date.now() + '_' + guestNumber,
+          username: 'אורח_' + guestNumber,
+          password: '',
+          role: 'guest',
+          online: true,
+          banned: false
+        };
+        try {
+          localStorage.setItem('bdsm_chat_user', JSON.stringify(guestUser));
+        } catch (e) {}
+        setCurrentUser(guestUser);
+        setIsGuest(true);
+      }
       setIsLoggedIn(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // FIRESTORE: real-time message subscription for the current room
+  useEffect(() => {
+    if (!isLoggedIn || !currentRoom || typeof window.fbSubscribeToRoom !== 'function') return;
+    const unsubscribe = window.fbSubscribeToRoom(currentRoom, msgs => {
+      setMessages(msgs);
+    });
+    return () => {
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
+  }, [isLoggedIn, currentRoom]);
 
   // Authentication Functions
   const handleLogin = (username, password) => {
@@ -499,45 +606,25 @@ const BDSMChat = () => {
         userId: currentUser.id,
         realUser: currentUser.username,
         isMasked: maskMode,
-        text: newMessage,
+        text: newMessage.trim(),
         room: currentRoom,
         timestamp: new Date().toLocaleTimeString('he-IL')
       };
-      setMessages(prev => [...prev, userMsg]);
       const messageToSend = newMessage;
       setNewMessage('');
-      setIsLoading(true);
+
+      // Save to Firestore — all connected clients will see it via the subscription
       try {
-        const response = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: 1000,
-            messages: [{
-              role: 'user',
-              content: `אתה משתתף בצ'אט קהילתי BDSM בעברית. החדר: "${currentRoom}". 
-              תגובה קצרה (1-3 משפטים), ידידותית, רלוונטית לנושא.
-              ההודעה: "${messageToSend}"
-              ענה כמשתתף רגיל בצ'אט.`
-            }]
-          })
-        });
-        const data = await response.json();
-        const aiText = data.content.find(item => item.type === 'text')?.text || 'אופס!';
-        setMessages(prev => [...prev, {
-          type: 'ai',
-          user: 'קלוד',
-          text: aiText,
-          room: currentRoom,
-          timestamp: new Date().toLocaleTimeString('he-IL')
-        }]);
+        if (typeof window.fbSendMessage === 'function') {
+          await window.fbSendMessage(userMsg);
+        } else {
+          // Fallback: local-only if Firebase failed to load
+          setMessages(prev => [...prev, userMsg]);
+        }
       } catch (error) {
-        console.error('Error:', error);
-      } finally {
-        setIsLoading(false);
+        console.error('Failed to send message to Firestore:', error);
+        alert('שגיאה בשליחת ההודעה. בדוק את חיבור האינטרנט.');
+        setNewMessage(messageToSend);
       }
     }
   };
