@@ -579,13 +579,27 @@ const BDSMChat = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // FIRESTORE: real-time message subscription for the current room
+  // FIRESTORE: real-time message subscription for the current room.
+  // Firebase loads asynchronously (ES module import), so we must keep polling/retrying
+  // until window.fbSubscribeToRoom becomes available, then subscribe.
   useEffect(() => {
-    if (!isLoggedIn || !currentRoom || typeof window.fbSubscribeToRoom !== 'function') return;
-    const unsubscribe = window.fbSubscribeToRoom(currentRoom, msgs => {
-      setMessages(msgs);
-    });
+    if (!isLoggedIn || !currentRoom) return;
+    let unsubscribe = null;
+    let cancelled = false;
+    const tryStart = () => {
+      if (cancelled) return;
+      if (typeof window.fbSubscribeToRoom === 'function') {
+        unsubscribe = window.fbSubscribeToRoom(currentRoom, msgs => {
+          if (!cancelled) setMessages(msgs);
+        });
+      } else {
+        // Firebase not ready yet — retry in 200ms
+        setTimeout(tryStart, 200);
+      }
+    };
+    tryStart();
     return () => {
+      cancelled = true;
       if (typeof unsubscribe === 'function') unsubscribe();
     };
   }, [isLoggedIn, currentRoom]);
