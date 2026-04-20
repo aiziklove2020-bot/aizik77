@@ -25,6 +25,28 @@
     .error-box { background: #1a0000; border: 1px solid #cc0000; padding: 24px; border-radius: 8px; max-width: 600px; margin: 40px auto; color: #fff; }
     .error-box h2 { color: #ff4444; margin-top: 0; }
     .error-box code { background: #000; padding: 2px 6px; border-radius: 3px; color: #ffaa00; display: block; white-space: pre-wrap; margin: 12px 0; font-size: 12px; }
+
+    /* Debug panel — shown when ?debug appears in the URL */
+    #debug-panel {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      background: rgba(0,0,0,0.92); border-top: 2px solid #cc0000;
+      color: #fff; font-family: 'Courier New', monospace; font-size: 12px;
+      padding: 12px; max-height: 220px; overflow-y: auto;
+      z-index: 99999; display: none; direction: ltr; text-align: left;
+    }
+    #debug-panel.visible { display: block; }
+    #debug-panel .line { padding: 2px 0; border-bottom: 1px solid #222; }
+    #debug-panel .ok  { color: #4ade80; }
+    #debug-panel .err { color: #ff6666; }
+    #debug-panel .info { color: #60a5fa; }
+    #debug-panel .title { font-weight: bold; color: #ffaa00; margin-bottom: 6px; }
+    #debug-toggle {
+      position: fixed; bottom: 10px; right: 10px;
+      background: #cc0000; color: white; border: none; padding: 8px 14px;
+      border-radius: 6px; cursor: pointer; z-index: 100000;
+      font-size: 12px; display: none;
+    }
+    #debug-toggle.visible { display: block; }
   </style>
 </head>
 <body>
@@ -36,75 +58,127 @@
     </div>
   </div>
 
+  <!-- Debug panel (hidden by default, shown with ?debug in URL) -->
+  <button id="debug-toggle" onclick="document.getElementById('debug-panel').classList.toggle('visible')">🐛 Debug</button>
+  <div id="debug-panel"><div class="title">🐛 DEBUG LOG</div></div>
+
+  <script>
+    // Global debug logger
+    (function() {
+      const urlParams = new URLSearchParams(window.location.search);
+      const debugMode = urlParams.has('debug') || urlParams.get('admin') === '2109';
+      if (debugMode) {
+        document.getElementById('debug-toggle').classList.add('visible');
+        document.getElementById('debug-panel').classList.add('visible');
+      }
+      window.__debugLog = function(msg, type) {
+        type = type || 'info';
+        const panel = document.getElementById('debug-panel');
+        if (!panel) return;
+        const line = document.createElement('div');
+        line.className = 'line ' + type;
+        const time = new Date().toLocaleTimeString('en-GB');
+        line.textContent = '[' + time + '] ' + msg;
+        panel.appendChild(line);
+        panel.scrollTop = panel.scrollHeight;
+        // Also log to console
+        console.log('[DEBUG]', msg);
+      };
+      // Catch all unhandled errors
+      window.addEventListener('error', function(e) {
+        window.__debugLog('💥 שגיאה לא-מטופלת: ' + (e.message || e.error), 'err');
+      });
+      window.addEventListener('unhandledrejection', function(e) {
+        const msg = e.reason && e.reason.message ? e.reason.message : String(e.reason);
+        window.__debugLog('💥 Promise rejected: ' + msg, 'err');
+      });
+    })();
+  </script>
+
   <!-- ======================================== -->
   <!-- FIREBASE v10 (ES MODULES)                -->
   <!-- ======================================== -->
   <script type="module">
-    import { initializeApp }
-      from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
-    import {
-      getAuth, signInAnonymously, onAuthStateChanged
-    } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
-    import {
-      getFirestore, collection, addDoc, query, where, orderBy,
-      onSnapshot, serverTimestamp, deleteDoc, doc, limit
-    } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
+    const log = (m, t) => window.__debugLog && window.__debugLog(m, t);
 
-    // ===== YOUR FIREBASE CONFIG =====
-    const firebaseConfig = {
-      apiKey: "AIzaSyAJv0APn-Qmv59H2Behu3PhskObCaPHW_A",
-      authDomain: "tbdsm-5acca.firebaseapp.com",
-      projectId: "tbdsm-5acca",
-      storageBucket: "tbdsm-5acca.firebasestorage.app",
-      messagingSenderId: "905865425928",
-      appId: "1:905865425928:web:1898ebb5b8de87ecf3cdbd",
-      measurementId: "G-FRE3N3T6JH"
-    };
+    try {
+      log('⏳ טוען את Firebase SDK...', 'info');
+      const { initializeApp } =
+        await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js');
+      const { getAuth, signInAnonymously, onAuthStateChanged } =
+        await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js');
+      const {
+        getFirestore, collection, addDoc, query, where, orderBy,
+        onSnapshot, serverTimestamp, deleteDoc, doc, limit
+      } = await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js');
+      log('✅ Firebase SDK נטען', 'ok');
 
-    // Init
-    const app  = initializeApp(firebaseConfig);
-    const auth = getAuth(app);
-    const db   = getFirestore(app);
+      const firebaseConfig = {
+        apiKey: "AIzaSyAJv0APn-Qmv59H2Behu3PhskObCaPHW_A",
+        authDomain: "tbdsm-5acca.firebaseapp.com",
+        projectId: "tbdsm-5acca",
+        storageBucket: "tbdsm-5acca.firebasestorage.app",
+        messagingSenderId: "905865425928",
+        appId: "1:905865425928:web:1898ebb5b8de87ecf3cdbd",
+        measurementId: "G-FRE3N3T6JH"
+      };
 
-    // Sign in anonymously so that Firestore security rules that require auth will pass
-    signInAnonymously(auth).catch(err => {
-      console.error('[Firebase] Anonymous sign-in failed:', err);
-      // Not fatal — if rules allow unauthenticated access, chat still works
-    });
+      const app  = initializeApp(firebaseConfig);
+      const auth = getAuth(app);
+      const db   = getFirestore(app);
+      log('✅ Firebase אותחל (project: tbdsm-5acca)', 'ok');
 
-    // Expose helpers to the React component via window
-    window.fbSendMessage = async (msg) => {
-      const doc = Object.assign({}, msg, { createdAt: serverTimestamp() });
-      return await addDoc(collection(db, 'messages'), doc);
-    };
+      // Try to sign in anonymously
+      try {
+        log('⏳ מנסה להתחבר אנונימית...', 'info');
+        await signInAnonymously(auth);
+        log('✅ התחברות אנונימית הצליחה', 'ok');
+      } catch (authErr) {
+        log('⚠️ התחברות אנונימית נכשלה: [' + (authErr.code || '?') + '] ' + authErr.message, 'err');
+        log('   → פתח Firebase Console → Authentication → Sign-in method → Anonymous → Enable', 'err');
+      }
 
-    window.fbDeleteMessage = async (firestoreId) => {
-      return await deleteDoc(doc(db, 'messages', firestoreId));
-    };
+      // Expose helpers
+      window.fbSendMessage = async (msg) => {
+        const payload = Object.assign({}, msg, { createdAt: serverTimestamp() });
+        log('📤 fbSendMessage → collection(messages).add()', 'info');
+        return await addDoc(collection(db, 'messages'), payload);
+      };
 
-    window.fbSubscribeToRoom = (roomName, callback) => {
-      // Get last 200 messages for this room, ordered oldest → newest
-      const q = query(
-        collection(db, 'messages'),
-        where('room', '==', roomName),
-        orderBy('createdAt', 'asc'),
-        limit(200)
-      );
-      return onSnapshot(q, (snapshot) => {
-        const msgs = snapshot.docs.map(d => {
-          const data = d.data();
-          return Object.assign({}, data, { _firestoreId: d.id });
+      window.fbDeleteMessage = async (firestoreId) => {
+        return await deleteDoc(doc(db, 'messages', firestoreId));
+      };
+
+      window.fbSubscribeToRoom = (roomName, callback) => {
+        log('👂 מאזין להודעות בחדר: "' + roomName + '"', 'info');
+        const q = query(
+          collection(db, 'messages'),
+          where('room', '==', roomName),
+          orderBy('createdAt', 'asc'),
+          limit(200)
+        );
+        return onSnapshot(q, (snapshot) => {
+          const msgs = snapshot.docs.map(d => {
+            const data = d.data();
+            return Object.assign({}, data, { _firestoreId: d.id });
+          });
+          log('📥 קיבלתי ' + msgs.length + ' הודעות מהחדר "' + roomName + '"', 'ok');
+          callback(msgs);
+        }, (err) => {
+          log('❌ שגיאת האזנה: [' + (err.code || '?') + '] ' + err.message, 'err');
+          if (err.code === 'permission-denied') {
+            log('   → עדכן את חוקי האבטחה ב-Firebase Console!', 'err');
+          }
         });
-        callback(msgs);
-      }, (err) => {
-        console.error('[Firebase] Subscription error:', err);
-      });
-    };
+      };
 
-    // Signal readiness so the React app knows Firebase is live
-    window.firebaseReady = true;
-    window.dispatchEvent(new Event('firebase-ready'));
-    console.log('[Firebase] Initialized successfully');
+      window.firebaseReady = true;
+      window.dispatchEvent(new Event('firebase-ready'));
+      log('🔥 Firebase מוכן - הצ\'אט מחובר!', 'ok');
+    } catch (initErr) {
+      log('💥 שגיאה קריטית באתחול Firebase: ' + initErr.message, 'err');
+      console.error('[Firebase] Init failed:', initErr);
+    }
   </script>
 
   <!-- ======================================== -->
@@ -449,34 +523,68 @@ const BDSMChat = () => {
     });
   }, [messages]);
 
-  // AUTO-LOGIN AS GUEST ON MOUNT — no registration required.
-  // Each browser gets a persistent random guest identity stored in localStorage
-  // so refresh doesn't create a new ghost user.
+  // AUTO-LOGIN ON MOUNT as a regular user (not guest) — no registration required,
+  // and no "guest restrictions" applied. Each browser gets a persistent random
+  // identity stored in localStorage.
+  //
+  // ADMIN ACCESS: add ?admin=2109 to the URL to become admin.
+  // Example: https://aizik77.vercel.app/?admin=2109
   useEffect(() => {
     if (!isLoggedIn) {
+      // Check for admin URL param
+      const urlParams = new URLSearchParams(window.location.search);
+      const adminCode = urlParams.get('admin');
+      if (adminCode === '2109') {
+        const adminUser = {
+          id: 'admin_main',
+          username: 'admin',
+          password: '2109',
+          role: 'admin',
+          online: true,
+          banned: false
+        };
+        try {
+          localStorage.setItem('bdsm_chat_user', JSON.stringify(adminUser));
+        } catch (e) {}
+        setCurrentUser(adminUser);
+        setIsGuest(false);
+        setIsLoggedIn(true);
+        return;
+      }
       let storedUser = null;
       try {
         const raw = localStorage.getItem('bdsm_chat_user');
         if (raw) storedUser = JSON.parse(raw);
       } catch (e) {/* ignore */}
       if (storedUser && storedUser.id && storedUser.username) {
+        // Upgrade old "guest" role to "user" so the banner disappears for
+        // returning visitors who were created under the old default
+        if (storedUser.role === 'guest' || !storedUser.role) {
+          storedUser.role = 'user';
+          if (storedUser.username && storedUser.username.indexOf('אורח_') === 0) {
+            storedUser.username = 'משתמש_' + storedUser.username.substring(5);
+          }
+          try {
+            localStorage.setItem('bdsm_chat_user', JSON.stringify(storedUser));
+          } catch (e) {}
+        }
         setCurrentUser(storedUser);
-        setIsGuest(storedUser.role === 'guest');
+        setIsGuest(false);
       } else {
-        const guestNumber = Math.floor(Math.random() * 10000);
-        const guestUser = {
-          id: 'g_' + Date.now() + '_' + guestNumber,
-          username: 'אורח_' + guestNumber,
+        const num = Math.floor(Math.random() * 10000);
+        const newUser = {
+          id: 'u_' + Date.now() + '_' + num,
+          username: 'משתמש_' + num,
           password: '',
-          role: 'guest',
+          role: 'user',
           online: true,
           banned: false
         };
         try {
-          localStorage.setItem('bdsm_chat_user', JSON.stringify(guestUser));
+          localStorage.setItem('bdsm_chat_user', JSON.stringify(newUser));
         } catch (e) {}
-        setCurrentUser(guestUser);
-        setIsGuest(true);
+        setCurrentUser(newUser);
+        setIsGuest(false);
       }
       setIsLoggedIn(true);
     }
@@ -613,17 +721,25 @@ const BDSMChat = () => {
       const messageToSend = newMessage;
       setNewMessage('');
 
-      // Save to Firestore — all connected clients will see it via the subscription
+      // Debug log
+      if (window.__debugLog) window.__debugLog('📤 שולח הודעה: "' + userMsg.text + '" לחדר: ' + currentRoom);
+
+      // Check if Firebase is ready
+      if (typeof window.fbSendMessage !== 'function') {
+        const msg = '❌ Firebase לא טעון. בדוק Console (F12) לשגיאות.';
+        if (window.__debugLog) window.__debugLog(msg);
+        alert(msg);
+        setNewMessage(messageToSend);
+        return;
+      }
       try {
-        if (typeof window.fbSendMessage === 'function') {
-          await window.fbSendMessage(userMsg);
-        } else {
-          // Fallback: local-only if Firebase failed to load
-          setMessages(prev => [...prev, userMsg]);
-        }
+        await window.fbSendMessage(userMsg);
+        if (window.__debugLog) window.__debugLog('✅ הודעה נשלחה בהצלחה ל-Firebase');
       } catch (error) {
         console.error('Failed to send message to Firestore:', error);
-        alert('שגיאה בשליחת ההודעה. בדוק את חיבור האינטרנט.');
+        const errMsg = error && error.code ? '[' + error.code + '] ' + error.message : String(error);
+        if (window.__debugLog) window.__debugLog('❌ שגיאה: ' + errMsg);
+        alert('שגיאה בשליחת ההודעה:\n\n' + errMsg + '\n\nצלם את הMessage הזה ושלח לClaude.');
         setNewMessage(messageToSend);
       }
     }
