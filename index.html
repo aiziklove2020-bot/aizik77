@@ -701,18 +701,62 @@ const BDSMChat = () => {
   }, [messages]);
 
   // Nickname-based login. User must type a nickname. Check for bans & uniqueness.
-  // Stored in localStorage so refresh doesn't kick them out.
+  // Session is saved to localStorage so refresh doesn't kick them out.
   const [loginNickname, setLoginNickname] = useState('');
   const [loginError, setLoginError] = useState('');
   const [loginChecking, setLoginChecking] = useState(false);
+
+  // On mount: try to restore session from localStorage
   useEffect(() => {
-    // Clear any previously stored session — we always require fresh nickname
-    // entry so that shared devices don't auto-login as the previous user.
     try {
-      localStorage.removeItem('bdsm_chat_user');
-    } catch (e) {}
+      const saved = localStorage.getItem('bdsm_chat_user');
+      if (!saved) return;
+      const parsed = JSON.parse(saved);
+      if (!parsed || !parsed.username || !parsed.id) return;
+
+      // Wait for Firebase to be ready, then re-claim the nickname
+      let attempts = 0;
+      const tryRestore = async () => {
+        attempts++;
+        if (typeof window.fbClaimNickname !== 'function') {
+          if (attempts < 40) { setTimeout(tryRestore, 200); }
+          return;
+        }
+        // Check ban first
+        const banned = typeof window.fbCheckBanned === 'function'
+          ? await window.fbCheckBanned(parsed.username)
+          : false;
+        if (banned) {
+          localStorage.removeItem('bdsm_chat_user');
+          return;
+        }
+        // Re-claim nickname (will succeed if stale > 60s, or if we own it)
+        const result = await window.fbClaimNickname(parsed.username);
+        if (result.ok) {
+          const restoredUser = {
+            id: result.userId,
+            username: parsed.username,
+            password: '',
+            role: parsed.role || 'user',
+            online: true,
+            banned: false
+          };
+          // Update stored userId (new claim = new userId)
+          try { localStorage.setItem('bdsm_chat_user', JSON.stringify({ username: restoredUser.username, id: restoredUser.id, role: restoredUser.role })); } catch(e) {}
+          setCurrentUser(restoredUser);
+          setIsLoggedIn(true);
+        } else {
+          // Nickname taken by someone else — clear session, user must re-login
+          localStorage.removeItem('bdsm_chat_user');
+        }
+      };
+      tryRestore();
+    } catch (e) {
+      try { localStorage.removeItem('bdsm_chat_user'); } catch(e2) {}
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
   const doNicknameLogin = async () => {
     setLoginError('');
     const nick = (loginNickname || '').trim();
@@ -742,7 +786,10 @@ const BDSMChat = () => {
         const result = await window.fbClaimNickname(nick);
         if (!result.ok) {
           let errorMsg;
-          if (result.reason === 'taken') errorMsg = 'כינוי זה כבר בשימוש - בחר אחר';else if (result.reason === 'reserved') errorMsg = 'כינוי זה שמור למנהלי הצ\'אט - בחר אחר';else if (result.reason === 'banned') errorMsg = 'כינוי זה נחסם מהצ\'אט';else errorMsg = 'שגיאה: ' + (result.reason || 'לא ידוע');
+          if (result.reason === 'taken') errorMsg = 'כינוי זה כבר בשימוש - בחר אחר';
+          else if (result.reason === 'reserved') errorMsg = 'כינוי זה שמור למנהלי הצ\'אט - בחר אחר';
+          else if (result.reason === 'banned') errorMsg = 'כינוי זה נחסם מהצ\'אט';
+          else errorMsg = 'שגיאה: ' + (result.reason || 'לא ידוע');
           setLoginError(errorMsg);
           setLoginChecking(false);
           return;
@@ -755,6 +802,8 @@ const BDSMChat = () => {
           online: true,
           banned: false
         };
+        // Save session to localStorage so refresh restores the user
+        try { localStorage.setItem('bdsm_chat_user', JSON.stringify({ username: nick, id: result.userId, role: 'user' })); } catch(e) {}
         setCurrentUser(newUser);
         setIsLoggedIn(true);
         setLoginNickname('');
@@ -948,6 +997,12 @@ const BDSMChat = () => {
 
   // LIVE: subscribe to private messages for current user
   const [livePrivateMessages, setLivePrivateMessages] = useState([]);
+  // Notification state for private messages
+  const [privateNotifications, setPrivateNotifications] = useState({}); // { senderNick: unreadCount }
+  const [toastNotification, setToastNotification] = useState(null); // { from, text, id }
+  const [seenPrivateMsgIds, setSeenPrivateMsgIds] = useState(new Set());
+  const prevPrivateMsgsRef = React.useRef([]);
+
   useEffect(() => {
     if (!isLoggedIn || !currentUser) return;
     let unsubscribe = null;
@@ -956,7 +1011,52 @@ const BDSMChat = () => {
       if (cancelled) return;
       if (typeof window.fbSubscribePrivate === 'function') {
         unsubscribe = window.fbSubscribePrivate(currentUser.username, msgs => {
-          if (!cancelled) setLivePrivateMessages(msgs);
+          if (!cancelled) {
+            setLivePrivateMessages(msgs);
+
+            // Detect NEW incoming messages (not from me, not seen before)
+            const prev = prevPrivateMsgsRef.current;
+            const prevIds = new Set(prev.map(m => m._firestoreId));
+            const newIncoming = msgs.filter(m =>
+              m.to === currentUser.username &&
+              m._firestoreId &&
+              !prevIds.has(m._firestoreId)
+            );
+
+            if (newIncoming.length > 0) {
+              // Update unread counters per sender
+              setPrivateNotifications(prevNotifs => {
+                const updated = { ...prevNotifs };
+                newIncoming.forEach(m => {
+                  // Only count if not currently viewing that chat
+                  updated[m.from] = (updated[m.from] || 0) + 1;
+                });
+                return updated;
+              });
+
+              // Show toast for the latest new message
+              const latest = newIncoming[newIncoming.length - 1];
+              const toastId = latest._firestoreId || Date.now();
+              setToastNotification({ from: latest.from, text: latest.text, id: toastId });
+
+              // Play a subtle notification sound via Web Audio API
+              try {
+                const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.frequency.setValueAtTime(880, ctx.currentTime);
+                osc.frequency.setValueAtTime(660, ctx.currentTime + 0.1);
+                gain.gain.setValueAtTime(0.15, ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+                osc.start(ctx.currentTime);
+                osc.stop(ctx.currentTime + 0.3);
+              } catch(e) {}
+            }
+
+            prevPrivateMsgsRef.current = msgs;
+          }
         });
       } else {
         setTimeout(tryStart, 200);
@@ -968,6 +1068,27 @@ const BDSMChat = () => {
       if (typeof unsubscribe === 'function') unsubscribe();
     };
   }, [isLoggedIn, currentUser]);
+
+  // Auto-dismiss toast after 5 seconds
+  useEffect(() => {
+    if (!toastNotification) return;
+    const t = setTimeout(() => setToastNotification(null), 5000);
+    return () => clearTimeout(t);
+  }, [toastNotification?.id]);
+
+  // Clear unread count when user opens a private chat
+  useEffect(() => {
+    if (currentView === 'private' && activePrivateChat) {
+      setPrivateNotifications(prev => {
+        const updated = { ...prev };
+        delete updated[activePrivateChat];
+        return updated;
+      });
+    }
+  }, [currentView, activePrivateChat]);
+
+  // Total unread private messages count
+  const totalUnreadPrivate = Object.values(privateNotifications).reduce((a, b) => a + b, 0);
 
   // Authentication Functions
   const handleLogin = (username, password) => {
@@ -1361,7 +1482,41 @@ const BDSMChat = () => {
         }
       `), /*#__PURE__*/React.createElement("div", {
     className: "flex h-screen relative z-10"
-  }, showRoomsSidebar && /*#__PURE__*/React.createElement("div", {
+  },
+  /* ===== PRIVATE MESSAGE TOAST ===== */
+  toastNotification && /*#__PURE__*/React.createElement("div", {
+    key: toastNotification.id,
+    style: {
+      position: 'fixed', top: '20px', right: '20px', zIndex: 99999,
+      maxWidth: '320px', width: 'calc(100vw - 40px)',
+      background: 'linear-gradient(135deg, #1a0000 0%, #0d0d0d 100%)',
+      border: '1px solid rgba(204,0,0,0.6)', borderRadius: '16px', padding: '16px',
+      boxShadow: '0 8px 32px rgba(204,0,0,0.3), 0 2px 8px rgba(0,0,0,0.8)',
+      animation: 'pmSlideIn 0.35s cubic-bezier(0.34,1.56,0.64,1)',
+      cursor: 'pointer', direction: 'rtl'
+    },
+    onClick: () => { setActivePrivateChat(toastNotification.from); setCurrentView('private'); setToastNotification(null); }
+  },
+    /*#__PURE__*/React.createElement("style", null, `
+      @keyframes pmSlideIn { from { transform: translateX(120%) scale(0.8); opacity:0; } to { transform: translateX(0) scale(1); opacity:1; } }
+      @keyframes pmPulse { 0%,100%{box-shadow:0 0 0 0 rgba(204,0,0,0.5);} 50%{box-shadow:0 0 0 8px rgba(204,0,0,0);} }
+    `),
+    /*#__PURE__*/React.createElement("div", { style: { display:'flex', alignItems:'flex-start', gap:'12px' } },
+      /*#__PURE__*/React.createElement("div", { style: { width:'44px',height:'44px',borderRadius:'50%',flexShrink:0, background:'linear-gradient(135deg,#cc0000,#8b0000)', display:'flex',alignItems:'center',justifyContent:'center', fontSize:'20px', animation:'pmPulse 1.5s infinite' } }, '💬'),
+      /*#__PURE__*/React.createElement("div", { style: { flex:1, minWidth:0 } },
+        /*#__PURE__*/React.createElement("div", { style: { fontSize:'11px',color:'#cc0000',fontWeight:'700',letterSpacing:'0.05em',marginBottom:'3px' } }, '💌 הודעה פרטית חדשה'),
+        /*#__PURE__*/React.createElement("div", { style: { fontSize:'15px',color:'#fff',fontWeight:'700',marginBottom:'4px' } }, toastNotification.from),
+        /*#__PURE__*/React.createElement("div", { style: { fontSize:'13px',color:'#ccc',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap' } }, toastNotification.text)
+      ),
+      /*#__PURE__*/React.createElement("button", {
+        onClick: (e)=>{ e.stopPropagation(); setToastNotification(null); },
+        style: { background:'none',border:'none',color:'#555',cursor:'pointer',fontSize:'18px',padding:'0',lineHeight:1,flexShrink:0 }
+      }, '✕')
+    ),
+    /*#__PURE__*/React.createElement("div", { style: { marginTop:'8px',fontSize:'11px',color:'#cc0000',textAlign:'center',opacity:0.8 } }, "👆 לחץ לפתיחת הצ'אט הפרטי")
+  ),
+  /* ===== END TOAST ===== */
+  showRoomsSidebar && /*#__PURE__*/React.createElement("div", {
     onClick: () => setShowRoomsSidebar(false),
     className: "md:hidden fixed inset-0 bg-black/60 z-40"
   }), /*#__PURE__*/React.createElement("div", {
@@ -1566,7 +1721,10 @@ const BDSMChat = () => {
     className: "hidden md:inline font-medium"
   }, "\u05DE\u05E9\u05EA\u05DE\u05E9\u05D9\u05DD \u05DE\u05D7\u05D5\u05D1\u05E8\u05D9\u05DD"), !showUsersSidebar && onlineUsers.length > 0 && /*#__PURE__*/React.createElement("span", {
     className: "bg-red-600 text-white text-xs font-bold rounded-full px-2 py-0.5"
-  }, onlineUsers.length)))), isInCall && /*#__PURE__*/React.createElement("div", {
+  }, onlineUsers.length),
+  totalUnreadPrivate > 0 && /*#__PURE__*/React.createElement("span", {
+    style: { position:'absolute', top:'-6px', right:'-6px', background:'#cc0000', color:'#fff', fontSize:'11px', fontWeight:'900', borderRadius:'50%', minWidth:'20px', height:'20px', display:'flex', alignItems:'center', justifyContent:'center', border:'2px solid #000', animation:'pmPulse 1.5s infinite', padding:'0 3px' }
+  }, totalUnreadPrivate > 9 ? '9+' : totalUnreadPrivate))), isInCall && /*#__PURE__*/React.createElement("div", {
     className: "glass-panel p-4 border-b border-white/5"
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex gap-4 justify-center"
@@ -2003,11 +2161,13 @@ const BDSMChat = () => {
         setCurrentView('private');
         setShowUsersSidebar(false);
       },
-      className: "p-2 rounded-lg bg-blue-600/20 hover:bg-blue-600 transition-all",
+      className: `p-2 rounded-lg transition-all relative ${privateNotifications[user.nickname] ? 'bg-blue-600 hover:bg-blue-700' : 'bg-blue-600/20 hover:bg-blue-600'}`,
       title: "\u05E9\u05DC\u05D7 \u05D4\u05D5\u05D3\u05E2\u05D4 \u05E4\u05E8\u05D8\u05D9\u05EA"
     }, /*#__PURE__*/React.createElement(MessageSquare, {
       className: "w-4 h-4"
-    }))));
+    }), privateNotifications[user.nickname] ? /*#__PURE__*/React.createElement("span", {
+      style: { position:'absolute', top:'-5px', right:'-5px', background:'#cc0000', color:'#fff', fontSize:'10px', fontWeight:'900', borderRadius:'50%', minWidth:'17px', height:'17px', display:'flex', alignItems:'center', justifyContent:'center', border:'2px solid #000' }
+    }, privateNotifications[user.nickname] > 9 ? '9+' : privateNotifications[user.nickname]) : null)));
   }), liveOnlineUsers.filter(u => u.nickname !== currentUser?.username).length === 0 && /*#__PURE__*/React.createElement("div", {
     className: "text-center text-gray-500 py-12"
   }, /*#__PURE__*/React.createElement("div", {
