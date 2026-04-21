@@ -700,61 +700,47 @@ const BDSMChat = () => {
     });
   }, [messages]);
 
-  // Nickname-based login. User must type a nickname. Check for bans & uniqueness.
-  // Session is saved to localStorage so refresh doesn't kick them out.
+  // Nickname-based login
   const [loginNickname, setLoginNickname] = useState('');
   const [loginError, setLoginError] = useState('');
   const [loginChecking, setLoginChecking] = useState(false);
+  const hasSaved = (() => { try { return !!localStorage.getItem('bdsm_chat_user'); } catch(e) { return false; } })();
+  const [sessionRestoring, setSessionRestoring] = useState(hasSaved);
 
-  // On mount: try to restore session from localStorage
+  // On mount: restore session from localStorage
   useEffect(() => {
+    const done = () => setSessionRestoring(false);
+    let saved, parsed;
     try {
-      const saved = localStorage.getItem('bdsm_chat_user');
-      if (!saved) return;
-      const parsed = JSON.parse(saved);
-      if (!parsed || !parsed.username || !parsed.id) return;
+      saved = localStorage.getItem('bdsm_chat_user');
+      if (!saved) { done(); return; }
+      parsed = JSON.parse(saved);
+      if (!parsed || !parsed.username || !parsed.id) { localStorage.removeItem('bdsm_chat_user'); done(); return; }
+    } catch(e) { try { localStorage.removeItem('bdsm_chat_user'); } catch(e2) {} done(); return; }
 
-      // Wait for Firebase to be ready, then re-claim the nickname
-      let attempts = 0;
-      const tryRestore = async () => {
-        attempts++;
-        if (typeof window.fbClaimNickname !== 'function') {
-          if (attempts < 40) { setTimeout(tryRestore, 200); }
-          return;
-        }
-        // Check ban first
-        const banned = typeof window.fbCheckBanned === 'function'
-          ? await window.fbCheckBanned(parsed.username)
-          : false;
-        if (banned) {
-          localStorage.removeItem('bdsm_chat_user');
-          return;
-        }
-        // Re-claim nickname (will succeed if stale > 60s, or if we own it)
+    let attempts = 0;
+    const tryRestore = async () => {
+      attempts++;
+      if (typeof window.fbClaimNickname !== 'function') {
+        if (attempts < 50) { setTimeout(tryRestore, 200); } else { done(); }
+        return;
+      }
+      try {
+        const banned = typeof window.fbCheckBanned === 'function' ? await window.fbCheckBanned(parsed.username) : false;
+        if (banned) { localStorage.removeItem('bdsm_chat_user'); done(); return; }
         const result = await window.fbClaimNickname(parsed.username);
         if (result.ok) {
-          const restoredUser = {
-            id: result.userId,
-            username: parsed.username,
-            password: '',
-            role: parsed.role || 'user',
-            online: true,
-            banned: false
-          };
-          // Update stored userId (new claim = new userId)
-          try { localStorage.setItem('bdsm_chat_user', JSON.stringify({ username: restoredUser.username, id: restoredUser.id, role: restoredUser.role })); } catch(e) {}
-          setCurrentUser(restoredUser);
+          const u = { id: result.userId, username: parsed.username, password: '', role: parsed.role || 'user', online: true, banned: false };
+          try { localStorage.setItem('bdsm_chat_user', JSON.stringify({ username: u.username, id: u.id, role: u.role })); } catch(e) {}
+          setCurrentUser(u);
           setIsLoggedIn(true);
         } else {
-          // Nickname taken by someone else — clear session, user must re-login
           localStorage.removeItem('bdsm_chat_user');
         }
-      };
-      tryRestore();
-    } catch (e) {
-      try { localStorage.removeItem('bdsm_chat_user'); } catch(e2) {}
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+      } catch(e) { localStorage.removeItem('bdsm_chat_user'); }
+      done();
+    };
+    tryRestore();
   }, []);
 
   const doNicknameLogin = async () => {
@@ -1354,6 +1340,11 @@ const BDSMChat = () => {
   };
 
   // Login/Register Screen
+  if (sessionRestoring) {
+    return /*#__PURE__*/React.createElement("div", {
+      className: "loader"
+    }, /*#__PURE__*/React.createElement("div", { className: "spinner" }), /*#__PURE__*/React.createElement("div", null, "\u05D8\u05D5\u05E2\u05DF \u05D0\u05EA \u05D4\u05E6'\u05D0\u05D8..."), /*#__PURE__*/React.createElement("div", { style:{fontSize:'13px',color:'#666'} }, "\u05DE\u05EA\u05D7\u05D1\u05E8 \u05DC-Firebase..."));
+  }
   if (!isLoggedIn) {
     return /*#__PURE__*/React.createElement("div", {
       className: "min-h-screen bg-black flex items-center justify-center p-4 relative overflow-hidden"
