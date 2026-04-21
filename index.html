@@ -199,6 +199,34 @@
         }
       };
 
+      // Reclaim an existing nickname using the same userId (used on page refresh)
+      window.fbReclaimNickname = async (nickname, userId) => {
+        const key = nickKey(nickname);
+        if (!key) return { ok: false };
+        try {
+          const nickRef = doc(db, 'chatNicknames', key);
+          const snap = await getDoc(nickRef);
+          if (snap.exists()) {
+            const data = snap.data();
+            // If the userId matches — it's the same user, allow reclaim
+            if (data.userId === userId) {
+              await setDoc(nickRef, { nickname: nickname.trim(), userId: userId, lastSeenAt: serverTimestamp() }, { merge: true });
+              return { ok: true, userId: userId };
+            }
+            // Different userId but stale — allow reclaim
+            const lastAt = data.lastSeenAt && data.lastSeenAt.seconds ? data.lastSeenAt.seconds * 1000 : 0;
+            if (Date.now() - lastAt > 60 * 1000) {
+              await setDoc(nickRef, { nickname: nickname.trim(), userId: userId, lastSeenAt: serverTimestamp() }, { merge: true });
+              return { ok: true, userId: userId };
+            }
+            return { ok: false, reason: 'taken' };
+          }
+          // Doesn't exist — claim fresh
+          await setDoc(nickRef, { nickname: nickname.trim(), userId: userId, lastSeenAt: serverTimestamp() });
+          return { ok: true, userId: userId };
+        } catch(e) { return { ok: false, reason: e.message }; }
+      };
+
       // Admin-only: claim a reserved admin nickname (bypasses the reserved check)
       window.fbClaimAdminNickname = async (nickname) => {
         const key = nickKey(nickname);
@@ -622,6 +650,9 @@ const BDSMChat = () => {
 
   // Show/Hide Users Sidebar
   const [showUsersSidebar, setShowUsersSidebar] = useState(false);
+  // Keep refs in sync so useEffect closures always read current values
+  useEffect(() => { currentViewRef.current = currentView; }, [currentView]);
+  useEffect(() => { activePmRef.current = activePrivateChat; }, [activePrivateChat]);
   // Emoji picker & image upload
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showPrivateEmojiPicker, setShowPrivateEmojiPicker] = useState(false);
@@ -730,11 +761,13 @@ const BDSMChat = () => {
         try {
           const banned = typeof window.fbCheckBanned === 'function' ? await window.fbCheckBanned(parsed.username) : false;
           if (banned) { sessionStorage.removeItem('bdsm_chat_user'); return; }
-          const result = await window.fbClaimNickname(parsed.username);
+          const reclaimFn = typeof window.fbReclaimNickname === 'function' ? window.fbReclaimNickname : window.fbClaimNickname;
+          const result = await reclaimFn(parsed.username, parsed.id);
           if (result.ok) {
-            setCurrentUser({ id: result.userId, username: parsed.username, password: '', role: parsed.role || 'user', online: true, banned: false });
+            const uid = result.userId || parsed.id;
+            setCurrentUser({ id: uid, username: parsed.username, password: '', role: parsed.role || 'user', online: true, banned: false });
             setIsLoggedIn(true);
-            sessionStorage.setItem('bdsm_chat_user', JSON.stringify({ username: parsed.username, id: result.userId, role: parsed.role || 'user' }));
+            sessionStorage.setItem('bdsm_chat_user', JSON.stringify({ username: parsed.username, id: uid, role: parsed.role || 'user' }));
           } else {
             sessionStorage.removeItem('bdsm_chat_user');
           }
@@ -982,6 +1015,8 @@ const BDSMChat = () => {
   const [pmUnread, setPmUnread] = useState({});
   const [pmToast, setPmToast] = useState(null);
   const prevPmRef = useRef([]);
+  const currentViewRef = useRef('chat');
+  const activePmRef = useRef(null);
 
   useEffect(() => {
     if (!isLoggedIn || !currentUser) return;
@@ -1000,7 +1035,7 @@ const BDSMChat = () => {
                 var u = Object.assign({}, prev);
                 newIn.forEach(function(m){
                   // don't count unread if currently in that chat
-                  if (!(currentView === 'private' && activePrivateChat === m.from)) {
+                  if (!(currentViewRef.current === 'private' && activePmRef.current === m.from)) {
                     u[m.from] = (u[m.from] || 0) + 1;
                   }
                 });
@@ -1008,7 +1043,7 @@ const BDSMChat = () => {
               });
               var latest = newIn[newIn.length - 1];
               // only show toast if NOT currently in that private chat
-              if (!(currentView === 'private' && activePrivateChat === latest.from)) {
+              if (!(currentViewRef.current === 'private' && activePmRef.current === latest.from)) {
                 setPmToast({ from: latest.from, text: latest.text, id: latest._firestoreId });
               }
               try {
