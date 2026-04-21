@@ -157,6 +157,14 @@
       window.fbClaimNickname = async (nickname) => {
         const key = nickKey(nickname);
         if (!key) return { ok: false, reason: 'invalid' };
+
+        // Reserved admin nicknames — only accessible via /admin panel
+        const RESERVED_ADMIN_NICKS = ['aizik_love', 'miss_chen', 'aizik love', 'miss chen'];
+        const normalizedNick = nickname.trim().toLowerCase();
+        if (RESERVED_ADMIN_NICKS.includes(normalizedNick) || RESERVED_ADMIN_NICKS.includes(key)) {
+          return { ok: false, reason: 'reserved' };
+        }
+
         try {
           // Check ban list first
           const banRef = doc(db, 'chatBans', key);
@@ -187,6 +195,25 @@
           return { ok: true, userId: userId };
         } catch (err) {
           log('❌ fbClaimNickname error: ' + err.message, 'err');
+          return { ok: false, reason: err.message };
+        }
+      };
+
+      // Admin-only: claim a reserved admin nickname (bypasses the reserved check)
+      window.fbClaimAdminNickname = async (nickname) => {
+        const key = nickKey(nickname);
+        if (!key) return { ok: false, reason: 'invalid' };
+        try {
+          const userId = 'admin_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
+          await setDoc(doc(db, 'chatNicknames', key), {
+            nickname: nickname.trim(),
+            userId: userId,
+            isAdmin: true,
+            claimedAt: serverTimestamp(),
+            lastSeenAt: serverTimestamp()
+          });
+          return { ok: true, userId: userId };
+        } catch (err) {
           return { ok: false, reason: err.message };
         }
       };
@@ -714,7 +741,9 @@ const BDSMChat = () => {
       if (typeof window.fbClaimNickname === 'function') {
         const result = await window.fbClaimNickname(nick);
         if (!result.ok) {
-          setLoginError(result.reason === 'taken' ? 'כינוי זה כבר בשימוש - בחר אחר' : 'שגיאה: ' + (result.reason || 'לא ידוע'));
+          let errorMsg;
+          if (result.reason === 'taken') errorMsg = 'כינוי זה כבר בשימוש - בחר אחר';else if (result.reason === 'reserved') errorMsg = 'כינוי זה שמור למנהלי הצ\'אט - בחר אחר';else if (result.reason === 'banned') errorMsg = 'כינוי זה נחסם מהצ\'אט';else errorMsg = 'שגיאה: ' + (result.reason || 'לא ידוע');
+          setLoginError(errorMsg);
           setLoginChecking(false);
           return;
         }
@@ -726,12 +755,10 @@ const BDSMChat = () => {
           online: true,
           banned: false
         };
-        // Do NOT persist to localStorage — force fresh nickname entry every visit
         setCurrentUser(newUser);
         setIsLoggedIn(true);
         setLoginNickname('');
       } else {
-        // Firebase not ready yet
         setLoginError('המערכת עוד טוענת, נסה שוב בעוד רגע...');
       }
     } catch (err) {
@@ -739,6 +766,54 @@ const BDSMChat = () => {
     }
     setLoginChecking(false);
   };
+
+  // Admin entry via URL: /?adminNick=aizik%20love&token=<secret>
+  // Only fires when the token matches the admin session token set by /admin page.
+  useEffect(() => {
+    if (isLoggedIn) return;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const adminNick = params.get('adminNick');
+      const token = params.get('token');
+      if (!adminNick || !token) return;
+
+      // Validate token against sessionStorage set by /admin page
+      const expectedToken = sessionStorage.getItem('admin_chat_token');
+      if (!expectedToken || token !== expectedToken) {
+        setLoginError('קישור אדמין לא תקף');
+        return;
+      }
+
+      // Auto-claim the admin nickname
+      (async () => {
+        if (typeof window.fbClaimAdminNickname !== 'function') {
+          setTimeout(() => {
+            // Re-trigger after Firebase loads
+            window.location.reload();
+          }, 500);
+          return;
+        }
+        const result = await window.fbClaimAdminNickname(adminNick);
+        if (result.ok) {
+          const adminUser = {
+            id: result.userId,
+            username: adminNick,
+            password: '',
+            role: 'admin',
+            online: true,
+            banned: false
+          };
+          setCurrentUser(adminUser);
+          setIsLoggedIn(true);
+          // Clean the URL so the token isn't visible
+          window.history.replaceState({}, '', window.location.pathname);
+        } else {
+          setLoginError('שגיאה בכניסה כמנהל: ' + (result.reason || 'לא ידוע'));
+        }
+      })();
+    } catch (e) {/* ignore */}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoggedIn]);
 
   // FIRESTORE: real-time message subscription for the current room.
   // Firebase loads asynchronously (ES module import), so we must keep polling/retrying
@@ -974,12 +1049,14 @@ const BDSMChat = () => {
   };
   const sendMessage = async () => {
     if (newMessage.trim() && currentUser) {
+      const isAdmin = currentUser.role === 'admin';
       const userMsg = {
         type: 'user',
         user: getDisplayName(),
         userId: currentUser.id,
         realUser: currentUser.username,
         isMasked: maskMode,
+        isAdmin: isAdmin,
         text: newMessage.trim(),
         room: currentRoom,
         timestamp: new Date().toLocaleTimeString('he-IL')
@@ -1530,39 +1607,48 @@ const BDSMChat = () => {
     className: "text-2xl font-bold text-white mb-3"
   }, "\u05D1\u05E8\u05D5\u05DB\u05D9\u05DD \u05D4\u05D1\u05D0\u05D9\u05DD \u05DC", currentRoom), /*#__PURE__*/React.createElement("p", {
     className: "text-gray-400 text-lg"
-  }, "\u05D4\u05EA\u05D7\u05D9\u05DC\u05D5 \u05E9\u05D9\u05D7\u05D4"))), messages.filter(msg => msg.type === 'system' || msg.room === currentRoom || !msg.room).map((msg, idx) => /*#__PURE__*/React.createElement("div", {
-    key: idx
-  }, msg.type === 'system' ? /*#__PURE__*/React.createElement("div", {
-    className: "text-center text-red-400 text-sm py-2"
-  }, msg.text) : /*#__PURE__*/React.createElement("div", {
-    className: `flex ${msg.userId === currentUser.id ? 'justify-start' : 'justify-end'} group`
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "flex items-start gap-2 md:gap-3 max-w-[85%] md:max-w-xl relative"
-  }, msg.userId !== currentUser.id && /*#__PURE__*/React.createElement("div", {
-    className: `w-8 h-8 md:w-10 md:h-10 flex-shrink-0 ${msg.isMasked ? 'bg-gradient-to-br from-purple-600 to-purple-800' : 'bg-gradient-to-br from-red-600 to-red-800'} rounded-full flex items-center justify-center shadow-lg text-sm md:text-base`
-  }, msg.type === 'ai' ? '🤖' : msg.isMasked ? '🎭' : '👤'), /*#__PURE__*/React.createElement("div", {
-    className: `px-3 md:px-5 py-2 md:py-3 rounded-2xl min-w-0 ${msg.userId === currentUser.id ? 'bg-red-600 shadow-lg' : msg.type === 'ai' ? 'bg-red-700/80' : 'bg-black/60 border border-red-600/20'}`
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "font-semibold text-xs md:text-sm mb-1 flex items-center gap-2 flex-wrap"
-  }, msg.user, msg.isMasked && /*#__PURE__*/React.createElement("span", {
-    className: "text-xs bg-purple-600/30 px-2 py-0.5 rounded"
-  }, "\u05DE\u05D5\u05E1\u05EA\u05E8")), /*#__PURE__*/React.createElement("div", {
-    className: "text-white break-words whitespace-pre-wrap text-sm md:text-base"
-  }, msg.text), /*#__PURE__*/React.createElement("div", {
-    className: "text-xs text-gray-300 mt-1 md:mt-2"
-  }, msg.timestamp)), msg.userId === currentUser.id && /*#__PURE__*/React.createElement("div", {
-    className: `w-8 h-8 md:w-10 md:h-10 flex-shrink-0 ${msg.isMasked ? 'bg-gradient-to-br from-purple-600 to-purple-800' : 'bg-gradient-to-br from-red-600 to-red-800'} rounded-full flex items-center justify-center shadow-lg text-sm md:text-base`
-  }, msg.isMasked ? '🎭' : '👤'), currentUser?.role === 'admin' && msg.type !== 'system' && /*#__PURE__*/React.createElement("div", {
-    className: "absolute -left-2 top-0 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1"
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => togglePinMessage(idx),
-    className: "p-1.5 bg-yellow-600 hover:bg-yellow-700 rounded-lg text-xs",
-    title: "\u05E0\u05E2\u05E5/\u05D1\u05D8\u05DC \u05E0\u05E2\u05D9\u05E6\u05D4"
-  }, "\uD83D\uDCCC"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => deleteMessage(idx),
-    className: "p-1.5 bg-red-600 hover:bg-red-700 rounded-lg text-xs",
-    title: "\u05DE\u05D7\u05E7 \u05D4\u05D5\u05D3\u05E2\u05D4"
-  }, "\uD83D\uDDD1\uFE0F")))))), isLoading && /*#__PURE__*/React.createElement("div", {
+  }, "\u05D4\u05EA\u05D7\u05D9\u05DC\u05D5 \u05E9\u05D9\u05D7\u05D4"))), messages.filter(msg => msg.type === 'system' || msg.room === currentRoom || !msg.room).map((msg, idx) => {
+    // Check if this message was sent by an admin
+    const ADMIN_NICKS = ['aizik love', 'miss chen'];
+    const isAdminMessage = msg.isAdmin === true || msg.realUser && ADMIN_NICKS.includes(msg.realUser.toLowerCase()) || msg.user && ADMIN_NICKS.includes(msg.user.toLowerCase());
+    return /*#__PURE__*/React.createElement("div", {
+      key: idx
+    }, msg.type === 'system' ? /*#__PURE__*/React.createElement("div", {
+      className: "text-center text-red-400 text-sm py-2"
+    }, msg.text) : /*#__PURE__*/React.createElement("div", {
+      className: `flex ${msg.userId === currentUser.id ? 'justify-start' : 'justify-end'} group`
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "flex items-start gap-2 md:gap-3 max-w-[85%] md:max-w-xl relative"
+    }, msg.userId !== currentUser.id && /*#__PURE__*/React.createElement("div", {
+      className: `w-8 h-8 md:w-10 md:h-10 flex-shrink-0 ${isAdminMessage ? 'bg-gradient-to-br from-yellow-500 to-amber-700 ring-2 ring-yellow-400' : msg.isMasked ? 'bg-gradient-to-br from-purple-600 to-purple-800' : 'bg-gradient-to-br from-red-600 to-red-800'} rounded-full flex items-center justify-center shadow-lg text-sm md:text-base`
+    }, isAdminMessage ? '👑' : msg.type === 'ai' ? '🤖' : msg.isMasked ? '🎭' : '👤'), /*#__PURE__*/React.createElement("div", {
+      className: `px-3 md:px-5 py-2 md:py-3 rounded-2xl min-w-0 ${isAdminMessage ? 'bg-gradient-to-br from-yellow-600/90 to-amber-700/90 shadow-xl shadow-yellow-900/30 border border-yellow-400/40' : msg.userId === currentUser.id ? 'bg-red-600 shadow-lg' : msg.type === 'ai' ? 'bg-red-700/80' : 'bg-black/60 border border-red-600/20'}`
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "font-semibold text-xs md:text-sm mb-1 flex items-center gap-2 flex-wrap"
+    }, isAdminMessage && /*#__PURE__*/React.createElement("span", {
+      className: "text-base md:text-lg"
+    }, "\uD83D\uDC51"), /*#__PURE__*/React.createElement("span", null, msg.user), isAdminMessage && /*#__PURE__*/React.createElement("span", {
+      className: "text-xs bg-yellow-400 text-black px-2 py-0.5 rounded font-black"
+    }, "\u05DE\u05E0\u05D4\u05DC"), msg.isMasked && !isAdminMessage && /*#__PURE__*/React.createElement("span", {
+      className: "text-xs bg-purple-600/30 px-2 py-0.5 rounded"
+    }, "\u05DE\u05D5\u05E1\u05EA\u05E8")), /*#__PURE__*/React.createElement("div", {
+      className: "text-white break-words whitespace-pre-wrap text-sm md:text-base"
+    }, msg.text), /*#__PURE__*/React.createElement("div", {
+      className: "text-xs text-gray-300 mt-1 md:mt-2"
+    }, msg.timestamp)), msg.userId === currentUser.id && /*#__PURE__*/React.createElement("div", {
+      className: `w-8 h-8 md:w-10 md:h-10 flex-shrink-0 ${isAdminMessage ? 'bg-gradient-to-br from-yellow-500 to-amber-700 ring-2 ring-yellow-400' : msg.isMasked ? 'bg-gradient-to-br from-purple-600 to-purple-800' : 'bg-gradient-to-br from-red-600 to-red-800'} rounded-full flex items-center justify-center shadow-lg text-sm md:text-base`
+    }, isAdminMessage ? '👑' : msg.isMasked ? '🎭' : '👤'), currentUser?.role === 'admin' && msg.type !== 'system' && /*#__PURE__*/React.createElement("div", {
+      className: "absolute -left-2 top-0 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1"
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: () => togglePinMessage(idx),
+      className: "p-1.5 bg-yellow-600 hover:bg-yellow-700 rounded-lg text-xs",
+      title: "\u05E0\u05E2\u05E5/\u05D1\u05D8\u05DC \u05E0\u05E2\u05D9\u05E6\u05D4"
+    }, "\uD83D\uDCCC"), /*#__PURE__*/React.createElement("button", {
+      onClick: () => deleteMessage(idx),
+      className: "p-1.5 bg-red-600 hover:bg-red-700 rounded-lg text-xs",
+      title: "\u05DE\u05D7\u05E7 \u05D4\u05D5\u05D3\u05E2\u05D4"
+    }, "\uD83D\uDDD1\uFE0F")))));
+  }), isLoading && /*#__PURE__*/React.createElement("div", {
     className: "flex justify-end"
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex items-start gap-3"
@@ -1861,34 +1947,40 @@ const BDSMChat = () => {
     className: "text-sm text-gray-400"
   }, onlineUsers.length, " \u05D0\u05D5\u05E0\u05DC\u05D9\u05D9\u05DF \u05DB\u05E8\u05D2\u05E2")), /*#__PURE__*/React.createElement("div", {
     className: "space-y-3 flex-1 overflow-y-auto"
-  }, liveOnlineUsers.filter(u => u.nickname !== currentUser?.username).map(user => /*#__PURE__*/React.createElement("div", {
-    key: user._id || user.nickname,
-    className: "px-4 py-3 bg-black/50 border border-red-600/20 rounded-xl flex items-center gap-3"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "w-11 h-11 bg-gradient-to-br from-red-600 to-red-800 rounded-full flex items-center justify-center shadow-lg text-lg"
-  }, "\uD83D\uDC64"), /*#__PURE__*/React.createElement("div", {
-    className: "flex-1 min-w-0"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "font-semibold text-white truncate"
-  }, user.nickname), /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center gap-2 text-xs"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "w-2 h-2 bg-green-400 rounded-full animate-pulse"
-  }), /*#__PURE__*/React.createElement("span", {
-    className: "text-green-400"
-  }, "\u05DE\u05D7\u05D5\u05D1\u05E8"))), /*#__PURE__*/React.createElement("div", {
-    className: "flex gap-1"
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      setActivePrivateChat(user.nickname);
-      setCurrentView('private');
-      setShowUsersSidebar(false);
-    },
-    className: "p-2 rounded-lg bg-blue-600/20 hover:bg-blue-600 transition-all",
-    title: "\u05E9\u05DC\u05D7 \u05D4\u05D5\u05D3\u05E2\u05D4 \u05E4\u05E8\u05D8\u05D9\u05EA"
-  }, /*#__PURE__*/React.createElement(MessageSquare, {
-    className: "w-4 h-4"
-  }))))), liveOnlineUsers.filter(u => u.nickname !== currentUser?.username).length === 0 && /*#__PURE__*/React.createElement("div", {
+  }, liveOnlineUsers.filter(u => u.nickname !== currentUser?.username).map(user => {
+    const ADMIN_NICKS = ['aizik love', 'miss chen'];
+    const userIsAdmin = user.isAdmin === true || ADMIN_NICKS.includes((user.nickname || '').toLowerCase());
+    return /*#__PURE__*/React.createElement("div", {
+      key: user._id || user.nickname,
+      className: `px-4 py-3 ${userIsAdmin ? 'bg-gradient-to-br from-yellow-900/30 to-amber-900/30 border border-yellow-500/40' : 'bg-black/50 border border-red-600/20'} rounded-xl flex items-center gap-3`
+    }, /*#__PURE__*/React.createElement("div", {
+      className: `w-11 h-11 ${userIsAdmin ? 'bg-gradient-to-br from-yellow-500 to-amber-700 ring-2 ring-yellow-400' : 'bg-gradient-to-br from-red-600 to-red-800'} rounded-full flex items-center justify-center shadow-lg text-lg`
+    }, userIsAdmin ? '👑' : '👤'), /*#__PURE__*/React.createElement("div", {
+      className: "flex-1 min-w-0"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "font-semibold text-white truncate flex items-center gap-2"
+    }, user.nickname, userIsAdmin && /*#__PURE__*/React.createElement("span", {
+      className: "text-xs bg-yellow-400 text-black px-2 py-0.5 rounded font-black flex-shrink-0"
+    }, "\u05DE\u05E0\u05D4\u05DC")), /*#__PURE__*/React.createElement("div", {
+      className: "flex items-center gap-2 text-xs"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "w-2 h-2 bg-green-400 rounded-full animate-pulse"
+    }), /*#__PURE__*/React.createElement("span", {
+      className: "text-green-400"
+    }, "\u05DE\u05D7\u05D5\u05D1\u05E8"))), /*#__PURE__*/React.createElement("div", {
+      className: "flex gap-1"
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: () => {
+        setActivePrivateChat(user.nickname);
+        setCurrentView('private');
+        setShowUsersSidebar(false);
+      },
+      className: "p-2 rounded-lg bg-blue-600/20 hover:bg-blue-600 transition-all",
+      title: "\u05E9\u05DC\u05D7 \u05D4\u05D5\u05D3\u05E2\u05D4 \u05E4\u05E8\u05D8\u05D9\u05EA"
+    }, /*#__PURE__*/React.createElement(MessageSquare, {
+      className: "w-4 h-4"
+    }))));
+  }), liveOnlineUsers.filter(u => u.nickname !== currentUser?.username).length === 0 && /*#__PURE__*/React.createElement("div", {
     className: "text-center text-gray-500 py-12"
   }, /*#__PURE__*/React.createElement("div", {
     className: "text-5xl mb-2"
