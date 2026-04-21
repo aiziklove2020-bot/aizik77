@@ -251,16 +251,23 @@
 
         const doLogout = () => {
           try { sessionStorage.removeItem('admin_ok'); } catch(e){}
-          try { sessionStorage.removeItem('admin_chat_token'); } catch(e){}
+          try { localStorage.removeItem('admin_chat_token'); } catch(e){}
           window.location.reload();
         };
 
         const enterChatAs = (adminNick) => {
-          // Create a secure token that ties this admin login to the chat session
+          // Generate a short-lived token so the chat page can verify this came from admin panel.
+          // Use localStorage so a new tab (or same tab navigation) can read it.
           const token = 'adm_' + Date.now() + '_' + Math.random().toString(36).substring(2);
-          try { sessionStorage.setItem('admin_chat_token', token); } catch(e){}
+          const tokenData = { token: token, nick: adminNick, expires: Date.now() + 5 * 60 * 1000 };
+          try { localStorage.setItem('admin_chat_token', JSON.stringify(tokenData)); } catch(e){}
           const url = '/?adminNick=' + encodeURIComponent(adminNick) + '&token=' + token;
-          window.open(url, '_blank');
+          // Try window.open first (desktop), fall back to direct navigation (mobile)
+          const newWindow = window.open(url, '_blank');
+          if (!newWindow || newWindow.closed || typeof newWindow.closed === 'undefined') {
+            // Popup blocked or mobile — navigate in same tab
+            window.location.href = url;
+          }
         };
 
         const confirmDelete = async (msg) => {

@@ -777,20 +777,43 @@ const BDSMChat = () => {
       const token = params.get('token');
       if (!adminNick || !token) return;
 
-      // Validate token against sessionStorage set by /admin page
-      const expectedToken = sessionStorage.getItem('admin_chat_token');
-      if (!expectedToken || token !== expectedToken) {
-        setLoginError('קישור אדמין לא תקף');
+      // Validate token against localStorage set by /admin page
+      let tokenData = null;
+      try {
+        const raw = localStorage.getItem('admin_chat_token');
+        if (raw) tokenData = JSON.parse(raw);
+      } catch (e) {/* ignore */}
+      if (!tokenData || tokenData.token !== token) {
+        setLoginError('קישור אדמין לא תקף. חזור לפאנל הניהול ונסה שוב.');
+        return;
+      }
+      if (tokenData.expires && Date.now() > tokenData.expires) {
+        setLoginError('קישור אדמין פג תוקף. חזור לפאנל הניהול ונסה שוב.');
+        try {
+          localStorage.removeItem('admin_chat_token');
+        } catch (e) {}
+        return;
+      }
+      if (tokenData.nick !== adminNick) {
+        setLoginError('קישור אדמין לא תואם לכינוי');
         return;
       }
 
-      // Auto-claim the admin nickname
-      (async () => {
+      // Clean URL immediately so token is not visible
+      try {
+        window.history.replaceState({}, '', window.location.pathname);
+      } catch (e) {}
+
+      // Wait for Firebase to be ready, then claim admin nickname
+      let attempts = 0;
+      const tryClaim = async () => {
+        attempts++;
         if (typeof window.fbClaimAdminNickname !== 'function') {
-          setTimeout(() => {
-            // Re-trigger after Firebase loads
-            window.location.reload();
-          }, 500);
+          if (attempts < 30) {
+            setTimeout(tryClaim, 200);
+          } else {
+            setLoginError('Firebase לא נטען בזמן - רענן את הדף');
+          }
           return;
         }
         const result = await window.fbClaimAdminNickname(adminNick);
@@ -805,13 +828,18 @@ const BDSMChat = () => {
           };
           setCurrentUser(adminUser);
           setIsLoggedIn(true);
-          // Clean the URL so the token isn't visible
-          window.history.replaceState({}, '', window.location.pathname);
+          // Clear the token so it can't be used again
+          try {
+            localStorage.removeItem('admin_chat_token');
+          } catch (e) {}
         } else {
           setLoginError('שגיאה בכניסה כמנהל: ' + (result.reason || 'לא ידוע'));
         }
-      })();
-    } catch (e) {/* ignore */}
+      };
+      tryClaim();
+    } catch (e) {
+      setLoginError('שגיאה: ' + (e.message || String(e)));
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoggedIn]);
 
