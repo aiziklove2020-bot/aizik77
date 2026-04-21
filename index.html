@@ -1077,13 +1077,16 @@ const BDSMChat = () => {
   const [livePrivateMessages, setLivePrivateMessages] = useState([]);
   const [pmUnread, setPmUnread] = useState({});
   const [pmToast, setPmToast] = useState(null);
-  const prevPmRef = useRef([]);
+  const seenMsgIds = useRef(new Set()); // IDs we already notified about - never reset
+  const initialLoadDone = useRef(false); // skip notifications on first load
 
   window.__cv = currentView;
   window.__apm = activePrivateChat;
 
   useEffect(() => {
     if (!isLoggedIn || !currentUser) return;
+    seenMsgIds.current = new Set(); // reset on login
+    initialLoadDone.current = false;
     let unsubscribe = null; let cancelled = false;
     const tryStart = () => {
       if (cancelled) return;
@@ -1091,21 +1094,40 @@ const BDSMChat = () => {
         unsubscribe = window.fbSubscribePrivate(currentUser.username, msgs => {
           if (!cancelled) {
             setLivePrivateMessages(msgs);
-            var prevIds = new Set(prevPmRef.current.map(function(m){ return m._firestoreId; }));
-            var newIn = msgs.filter(function(m){ return m.to === currentUser.username && m._firestoreId && !prevIds.has(m._firestoreId); });
+
+            if (!initialLoadDone.current) {
+              // First load — mark all existing messages as seen, no notifications
+              msgs.forEach(function(m){ if (m._firestoreId) seenMsgIds.current.add(m._firestoreId); });
+              initialLoadDone.current = true;
+              return;
+            }
+
+            // Find truly new incoming messages
+            var newIn = msgs.filter(function(m){
+              return m.to === currentUser.username && m._firestoreId && !seenMsgIds.current.has(m._firestoreId);
+            });
+
             if (newIn.length > 0) {
+              // Mark them all as seen immediately
+              newIn.forEach(function(m){ seenMsgIds.current.add(m._firestoreId); });
+
+              // Update unread counts (only if not currently in that chat)
               setPmUnread(function(prev) {
                 var u = Object.assign({}, prev);
-                newIn.forEach(function(m){ if (!(window.__cv==='private'&&window.__apm===m.from)) u[m.from]=(u[m.from]||0)+1; });
+                newIn.forEach(function(m){
+                  if (!(window.__cv==='private' && window.__apm===m.from))
+                    u[m.from] = (u[m.from]||0) + 1;
+                });
                 return u;
               });
+
+              // Show toast for latest (only if not in that chat)
               var latest = newIn[newIn.length-1];
-              if (!(window.__cv==='private'&&window.__apm===latest.from)) {
-                setPmToast({from:latest.from,text:latest.text,id:latest._firestoreId});
+              if (!(window.__cv==='private' && window.__apm===latest.from)) {
+                setPmToast({from:latest.from, text:latest.text, id:latest._firestoreId});
                 if (typeof window.playSound === 'function') window.playSound('receive');
               }
             }
-            prevPmRef.current = msgs;
           }
         });
       } else setTimeout(tryStart, 200);
