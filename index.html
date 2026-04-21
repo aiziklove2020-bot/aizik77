@@ -295,6 +295,18 @@
       };
 
       // Subscribe to pinned message (admin can pin one message for everyone)
+      window.fbSubscribeRooms = (callback) => {
+        return onSnapshot(collection(db, 'chatRooms'), (snap) => {
+          var rooms = snap.docs.map(d => Object.assign({}, d.data(), {_id: d.id}));
+          rooms.sort((a,b) => (a.order||99)-(b.order||99));
+          callback(rooms);
+        }, () => callback([]));
+      };
+      window.fbSubscribeParty = (callback) => {
+        return onSnapshot(doc(db, 'chatSettings', 'party'), (snap) => {
+          callback(snap.exists() ? snap.data() : null);
+        }, () => callback(null));
+      };
       window.fbSubscribePinned = (callback) => {
         return onSnapshot(doc(db, 'chatPinned', 'current'), (snap) => {
           callback(snap.exists() ? snap.data() : null);
@@ -927,6 +939,47 @@ const BDSMChat = () => {
     window.addEventListener('pagehide', handlePageHide);
     return () => { clearInterval(interval); window.removeEventListener('pagehide',handlePageHide); };
   }, [isLoggedIn, currentUser]);
+
+  // LIVE: subscribe to Firebase rooms (set by admin)
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    var unsub = null, cancelled = false;
+    var tryStart = function() {
+      if (cancelled) return;
+      if (typeof window.fbSubscribeRooms === 'function') {
+        unsub = window.fbSubscribeRooms(function(fbRooms) {
+          if (!cancelled && fbRooms && fbRooms.length > 0) {
+            setRooms(fbRooms.map(function(r,i){ return {id:r._id||i,name:r.name,icon:r.icon||'💬',description:r.description||''}; }));
+          }
+        });
+      } else setTimeout(tryStart, 300);
+    };
+    tryStart();
+    return function(){ cancelled=true; if(typeof unsub==='function') unsub(); };
+  }, [isLoggedIn]);
+
+  // LIVE: subscribe to party announcement (set by admin)
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    var unsub = null, cancelled = false;
+    var tryStart = function() {
+      if (cancelled) return;
+      if (typeof window.fbSubscribeParty === 'function') {
+        unsub = window.fbSubscribeParty(function(p) {
+          if (!cancelled) {
+            if (p && p.active) {
+              setShowPartyAnnouncement(true);
+              setPartyAnnouncementText(p.text || '');
+            } else {
+              setShowPartyAnnouncement(false);
+            }
+          }
+        });
+      } else setTimeout(tryStart, 300);
+    };
+    tryStart();
+    return function(){ cancelled=true; if(typeof unsub==='function') unsub(); };
+  }, [isLoggedIn]);
 
   // LIVE: subscribe to list of online users (chatNicknames collection)
   const [liveOnlineUsers, setLiveOnlineUsers] = useState([]);
