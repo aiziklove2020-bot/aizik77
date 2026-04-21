@@ -2,7 +2,11 @@
 <html lang="he" dir="rtl">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#000000" />
   <title>BDSM Chat</title>
 
   <!-- Tailwind CSS Play CDN -->
@@ -15,10 +19,18 @@
 
   <style>
     * { font-family: 'Assistant', sans-serif; }
-    body { margin: 0; background: #000; color: #fff; -webkit-font-smoothing: antialiased; }
-    #root { min-height: 100vh; }
+    body { margin: 0; background: #000; color: #fff; -webkit-font-smoothing: antialiased; overscroll-behavior: none; }
+    #root { min-height: 100vh; min-height: 100dvh; }
+    /* Make h-screen work correctly on mobile (accounts for address bar) */
+    .h-screen { height: 100vh; height: 100dvh; }
     .glass-panel { background: rgba(10,10,10,0.6); backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.05); }
     .logo-glow { text-shadow: 0 0 30px rgba(204, 0, 0, 0.4); }
+    /* Safe area support for iPhone notches */
+    .pb-safe { padding-bottom: max(0.75rem, env(safe-area-inset-bottom)); }
+    /* Prevent iOS zoom on input focus */
+    @media (max-width: 767px) {
+      input, textarea { font-size: 16px !important; }
+    }
     .loader { display: flex; align-items: center; justify-content: center; height: 100vh; color: #888; font-size: 18px; flex-direction: column; gap: 16px; }
     .spinner { width: 40px; height: 40px; border: 3px solid #333; border-top-color: #cc0000; border-radius: 50%; animation: spin 1s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
@@ -221,6 +233,65 @@
         } catch (err) {
           // Silent
         }
+      };
+
+      // Subscribe to online users list (real-time)
+      window.fbSubscribeOnline = (callback) => {
+        const q = query(collection(db, 'chatNicknames'));
+        return onSnapshot(q, (snapshot) => {
+          const cutoff = Date.now() - 90 * 1000; // 90 sec stale window
+          const users = snapshot.docs
+            .map(d => Object.assign({}, d.data(), { _id: d.id }))
+            .filter(u => u.lastSeenAt && u.lastSeenAt.seconds && (u.lastSeenAt.seconds * 1000) > cutoff);
+          callback(users);
+        }, (err) => {
+          log('❌ fbSubscribeOnline err: ' + err.message, 'err');
+        });
+      };
+
+      // Subscribe to pinned message (admin can pin one message for everyone)
+      window.fbSubscribePinned = (callback) => {
+        return onSnapshot(doc(db, 'chatPinned', 'current'), (snap) => {
+          callback(snap.exists() ? snap.data() : null);
+        }, (err) => {
+          log('❌ fbSubscribePinned err: ' + err.message, 'err');
+        });
+      };
+
+      // Send a private message
+      window.fbSendPrivate = async (msg) => {
+        const payload = Object.assign({}, msg, { createdAt: serverTimestamp() });
+        return await addDoc(collection(db, 'chatPrivateMessages'), payload);
+      };
+
+      // Subscribe to private messages for current user (both sent + received)
+      window.fbSubscribePrivate = (nickname, callback) => {
+        // Listen to messages where this user is sender OR receiver.
+        // Firestore doesn't allow OR queries on different fields, so we run 2 and merge.
+        const qTo = query(collection(db, 'chatPrivateMessages'), where('to', '==', nickname), limit(500));
+        const qFrom = query(collection(db, 'chatPrivateMessages'), where('from', '==', nickname), limit(500));
+        let toMsgs = [], fromMsgs = [];
+        const merge = () => {
+          const all = [...toMsgs, ...fromMsgs];
+          // Deduplicate by firestore ID (though a message only matches one direction)
+          const seen = {};
+          const deduped = all.filter(m => { if (seen[m._firestoreId]) return false; seen[m._firestoreId] = true; return true; });
+          deduped.sort((a, b) => {
+            const aT = a.createdAt && a.createdAt.seconds ? a.createdAt.seconds : 0;
+            const bT = b.createdAt && b.createdAt.seconds ? b.createdAt.seconds : 0;
+            return aT - bT;
+          });
+          callback(deduped);
+        };
+        const u1 = onSnapshot(qTo, (snap) => {
+          toMsgs = snap.docs.map(d => Object.assign({}, d.data(), { _firestoreId: d.id }));
+          merge();
+        }, (err) => log('❌ private(to): ' + err.message, 'err'));
+        const u2 = onSnapshot(qFrom, (snap) => {
+          fromMsgs = snap.docs.map(d => Object.assign({}, d.data(), { _firestoreId: d.id }));
+          merge();
+        }, (err) => log('❌ private(from): ' + err.message, 'err'));
+        return () => { u1(); u2(); };
       };
 
       window.fbSubscribeToRoom = (roomName, callback) => {
@@ -737,6 +808,78 @@ const BDSMChat = () => {
     return () => clearInterval(interval);
   }, [isLoggedIn, currentUser]);
 
+  // LIVE: subscribe to list of online users (chatNicknames collection)
+  const [liveOnlineUsers, setLiveOnlineUsers] = useState([]);
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    let unsubscribe = null;
+    let cancelled = false;
+    const tryStart = () => {
+      if (cancelled) return;
+      if (typeof window.fbSubscribeOnline === 'function') {
+        unsubscribe = window.fbSubscribeOnline(users => {
+          if (!cancelled) setLiveOnlineUsers(users);
+        });
+      } else {
+        setTimeout(tryStart, 200);
+      }
+    };
+    tryStart();
+    return () => {
+      cancelled = true;
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
+  }, [isLoggedIn]);
+
+  // LIVE: subscribe to pinned message (settings/chatPinned document)
+  const [livePinnedMessage, setLivePinnedMessage] = useState(null);
+
+  // Mobile: show/hide rooms sidebar (drawer)
+  const [showRoomsSidebar, setShowRoomsSidebar] = useState(false);
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    let unsubscribe = null;
+    let cancelled = false;
+    const tryStart = () => {
+      if (cancelled) return;
+      if (typeof window.fbSubscribePinned === 'function') {
+        unsubscribe = window.fbSubscribePinned(pin => {
+          if (!cancelled) setLivePinnedMessage(pin);
+        });
+      } else {
+        setTimeout(tryStart, 200);
+      }
+    };
+    tryStart();
+    return () => {
+      cancelled = true;
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
+  }, [isLoggedIn]);
+
+  // LIVE: subscribe to private messages for current user
+  const [livePrivateMessages, setLivePrivateMessages] = useState([]);
+  useEffect(() => {
+    if (!isLoggedIn || !currentUser) return;
+    let unsubscribe = null;
+    let cancelled = false;
+    const tryStart = () => {
+      if (cancelled) return;
+      if (typeof window.fbSubscribePrivate === 'function') {
+        unsubscribe = window.fbSubscribePrivate(currentUser.username, msgs => {
+          if (!cancelled) setLivePrivateMessages(msgs);
+        });
+      } else {
+        setTimeout(tryStart, 200);
+      }
+    };
+    tryStart();
+    return () => {
+      cancelled = true;
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
+  }, [isLoggedIn, currentUser]);
+
   // Authentication Functions
   const handleLogin = (username, password) => {
     const user = users.find(u => u.username === username && u.password === password);
@@ -801,7 +944,7 @@ const BDSMChat = () => {
   };
   const toggleMaskMode = mask => {
     if (isGuest) {
-      alert('🔒 מצב מסכה זמין רק למשתמשים רשומים!\n\nהירשם עכשיו כדי ליהנות מאנונימיות מלאה');
+      alert('🔒 מצב אנונימי זמין רק למשתמשים רשומים!\n\nהירשם עכשיו כדי ליהנות מאנונימיות מלאה');
       return;
     }
     if (!maskMode) {
@@ -873,27 +1016,28 @@ const BDSMChat = () => {
   };
 
   // Private Message Functions
-  const sendPrivateMessage = () => {
-    if (privateMessage.trim() && activePrivateChat) {
-      const newMsg = {
-        from: currentUser.username,
-        to: activePrivateChat,
-        text: privateMessage,
-        timestamp: new Date().toLocaleTimeString('he-IL')
-      };
-      const chatKey = [currentUser.username, activePrivateChat].sort().join('-');
-      setPrivateChats(prev => ({
-        ...prev,
-        [chatKey]: [...(prev[chatKey] || []), newMsg]
-      }));
-      setPrivateMessage('');
+  const sendPrivateMessage = async () => {
+    const text = (privateMessage || '').trim();
+    if (!text || !activePrivateChat || !currentUser) return;
+    setPrivateMessage('');
+    try {
+      if (typeof window.fbSendPrivate === 'function') {
+        await window.fbSendPrivate({
+          from: currentUser.username,
+          to: activePrivateChat,
+          text: text,
+          timestamp: new Date().toLocaleTimeString('he-IL')
+        });
+      } else {
+        alert('המערכת עוד טוענת, נסה שוב');
+        setPrivateMessage(text);
+      }
+    } catch (err) {
+      alert('שגיאה בשליחה: ' + (err.message || String(err)));
+      setPrivateMessage(text);
     }
   };
   const startPrivateChat = username => {
-    if (isGuest) {
-      alert('🔒 תכונה זו זמינה רק למשתמשים רשומים!\n\nהירשם עכשיו כדי:\n✓ לשלוח הודעות פרטיות\n✓ לבצע שיחות וידאו\n✓ לשמור היסטוריה\n✓ ליהנות מכל התכונות');
-      return;
-    }
     setActivePrivateChat(username);
     setCurrentView('private');
   };
@@ -1024,15 +1168,15 @@ const BDSMChat = () => {
             50% { opacity: 0.5; }
           }
         `), /*#__PURE__*/React.createElement("div", {
-      className: "relative z-10 glass-panel p-10 rounded-3xl shadow-2xl max-w-lg w-full"
+      className: "relative z-10 glass-panel p-6 md:p-10 rounded-3xl shadow-2xl max-w-lg w-full"
     }, /*#__PURE__*/React.createElement("div", {
-      className: "flex flex-col items-center mb-8"
+      className: "flex flex-col items-center mb-6 md:mb-8"
     }, /*#__PURE__*/React.createElement("div", {
-      className: "text-center mb-6"
+      className: "text-center mb-4 md:mb-6"
     }, /*#__PURE__*/React.createElement("div", {
       className: "mb-2"
     }, /*#__PURE__*/React.createElement("span", {
-      className: "text-6xl font-black logo-glow",
+      className: "text-5xl md:text-6xl font-black logo-glow",
       style: {
         color: '#CC0000',
         letterSpacing: '-0.05em',
@@ -1041,13 +1185,13 @@ const BDSMChat = () => {
     }, "\u05DE\u05D3\u05D1\u05E8\u05D9\u05DD")), /*#__PURE__*/React.createElement("div", {
       className: "mb-4"
     }, /*#__PURE__*/React.createElement("span", {
-      className: "text-6xl font-black text-white",
+      className: "text-5xl md:text-6xl font-black text-white",
       style: {
         letterSpacing: '-0.05em',
         fontStyle: 'italic'
       }
     }, "\u05D1\u05D3\u05E1\u05DE")), /*#__PURE__*/React.createElement("div", {
-      className: "text-white text-sm tracking-widest font-black",
+      className: "text-white text-xs md:text-sm tracking-widest font-black",
       style: {
         fontFamily: 'Inter, sans-serif',
         letterSpacing: '0.6em'
@@ -1082,7 +1226,7 @@ const BDSMChat = () => {
       className: "text-center text-gray-500 text-xs mt-4"
     }, "\u05D4\u05DB\u05D9\u05E0\u05D5\u05D9 \u05E9\u05DC\u05DA \u05D7\u05D9\u05D9\u05D1 \u05DC\u05D4\u05D9\u05D5\u05EA \u05D9\u05D9\u05D7\u05D5\u05D3\u05D9. \u05DB\u05DC \u05D4\u05D5\u05D3\u05E2\u05D4 \u05E9\u05EA\u05E9\u05DC\u05D7 \u05EA\u05D5\u05E4\u05D9\u05E2 \u05E2\u05DD \u05D4\u05DB\u05D9\u05E0\u05D5\u05D9 \u05E9\u05D1\u05D7\u05E8\u05EA."))));
   }
-  const onlineUsers = users.filter(u => u.online && u.id !== currentUser.id);
+  const onlineUsers = liveOnlineUsers.filter(u => u.nickname !== currentUser?.username);
   const currentRoomData = rooms.find(r => r.name === currentRoom);
   return /*#__PURE__*/React.createElement("div", {
     className: "min-h-screen bg-black text-white relative",
@@ -1126,8 +1270,16 @@ const BDSMChat = () => {
         }
       `), /*#__PURE__*/React.createElement("div", {
     className: "flex h-screen relative z-10"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "w-72 glass-panel p-6 flex flex-col border-l border-white/5"
+  }, showRoomsSidebar && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setShowRoomsSidebar(false),
+    className: "md:hidden fixed inset-0 bg-black/60 z-40"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: `
+          fixed md:static top-0 right-0 h-screen w-72 glass-panel p-6 flex flex-col border-l border-white/5
+          z-50 transform transition-transform duration-300 ease-in-out
+          ${showRoomsSidebar ? 'translate-x-0' : 'translate-x-full'}
+          md:translate-x-0
+        `
   }, /*#__PURE__*/React.createElement("div", {
     className: "mb-8"
   }, /*#__PURE__*/React.createElement("div", {
@@ -1160,7 +1312,7 @@ const BDSMChat = () => {
     className: "mt-2 px-2 py-1 bg-yellow-600/20 border border-yellow-600/30 rounded text-xs text-yellow-400"
   }, "\uD83D\uDC64 \u05D0\u05D5\u05E8\u05D7 (\u05DE\u05D5\u05D2\u05D1\u05DC)"), maskMode && selectedMask && /*#__PURE__*/React.createElement("div", {
     className: `mt-2 px-2 py-1 bg-gradient-to-r ${selectedMask.color} rounded text-xs text-white font-semibold`
-  }, "\uD83C\uDFAD \u05DE\u05E6\u05D1 \u05DE\u05E1\u05DB\u05D4 \u05E4\u05E2\u05D9\u05DC"))), /*#__PURE__*/React.createElement("div", {
+  }, "\uD83C\uDFAD \u05DE\u05E6\u05D1 \u05D0\u05E0\u05D5\u05E0\u05D9\u05DE\u05D9 \u05E4\u05E2\u05D9\u05DC"))), /*#__PURE__*/React.createElement("div", {
     className: "flex gap-2 mb-4"
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => setCurrentView('chat'),
@@ -1170,11 +1322,11 @@ const BDSMChat = () => {
     className: `w-full px-4 py-3 rounded-xl mb-4 transition-all flex items-center justify-center gap-2 font-medium ${maskMode ? `bg-gradient-to-r ${selectedMask?.color} text-white shadow-lg` : 'bg-purple-600/20 hover:bg-purple-600/40 border border-purple-500/30 text-purple-300'}`
   }, /*#__PURE__*/React.createElement("span", {
     className: "text-xl"
-  }, "\uD83C\uDFAD"), /*#__PURE__*/React.createElement("span", null, maskMode ? 'מצב מסכה פעיל' : 'הפעל מצב מסכה')), showMaskSelector && !isGuest && /*#__PURE__*/React.createElement("div", {
+  }, "\uD83C\uDFAD"), /*#__PURE__*/React.createElement("span", null, maskMode ? 'מצב אנונימי פעיל' : 'הפעל מצב אנונימי')), showMaskSelector && !isGuest && /*#__PURE__*/React.createElement("div", {
     className: "mb-4 p-4 bg-black/70 backdrop-blur-md border border-purple-500/30 rounded-xl space-y-2"
   }, /*#__PURE__*/React.createElement("h4", {
     className: "text-sm font-bold text-purple-300 mb-3"
-  }, "\u05D1\u05D7\u05E8 \u05DE\u05E1\u05DB\u05D4:"), /*#__PURE__*/React.createElement("div", {
+  }, "\u05D1\u05D7\u05E8 \u05D3\u05DE\u05D5\u05EA \u05D0\u05E0\u05D5\u05E0\u05D9\u05DE\u05D9\u05EA:"), /*#__PURE__*/React.createElement("div", {
     className: "grid grid-cols-2 gap-2 max-h-64 overflow-y-auto"
   }, availableMasks.map(mask => /*#__PURE__*/React.createElement("button", {
     key: mask.id,
@@ -1187,13 +1339,14 @@ const BDSMChat = () => {
   }, mask.name)))), maskMode && /*#__PURE__*/React.createElement("button", {
     onClick: () => toggleMaskMode(null),
     className: "w-full px-3 py-2 mt-3 bg-red-600/20 hover:bg-red-600 border border-red-500/30 rounded-lg text-sm font-medium transition-all"
-  }, "\u05D1\u05D8\u05DC \u05DE\u05E6\u05D1 \u05DE\u05E1\u05DB\u05D4"))), /*#__PURE__*/React.createElement("div", {
+  }, "\u05D1\u05D8\u05DC \u05DE\u05E6\u05D1 \u05D0\u05E0\u05D5\u05E0\u05D9\u05DE\u05D9"))), /*#__PURE__*/React.createElement("div", {
     className: "flex-1 overflow-y-auto space-y-3 mb-6"
   }, rooms.map(room => /*#__PURE__*/React.createElement("button", {
     key: room.id,
     onClick: () => {
       setCurrentRoom(room.name);
       setCurrentView('chat');
+      setShowRoomsSidebar(false);
     },
     className: `w-full text-right px-4 py-4 rounded-xl transition-all flex items-center gap-3 group ${currentRoom === room.name && currentView === 'chat' ? 'bg-gradient-to-r from-red-700 to-red-900 shadow-lg' : 'glass-panel hover:bg-white/5'}`
   }, /*#__PURE__*/React.createElement("span", {
@@ -1228,65 +1381,98 @@ const BDSMChat = () => {
     },
     className: "px-6 py-3 bg-white text-orange-600 font-bold rounded-xl hover:bg-gray-100 transition-all shadow-lg whitespace-nowrap"
   }, "\u05D4\u05D9\u05E8\u05E9\u05DD \u05E2\u05DB\u05E9\u05D9\u05D5!")), maskMode && selectedMask && /*#__PURE__*/React.createElement("div", {
-    className: `bg-gradient-to-r ${selectedMask.color} px-8 py-4 flex items-center justify-between`
+    className: `bg-gradient-to-r ${selectedMask.color} px-4 md:px-8 py-3 md:py-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-3`
   }, /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center gap-3"
+    className: "flex items-center gap-3 min-w-0"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "text-3xl"
-  }, selectedMask.emoji), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-    className: "font-bold text-white text-lg"
-  }, "\u05DE\u05E6\u05D1 \u05DE\u05E1\u05DB\u05D4 \u05E4\u05E2\u05D9\u05DC - ", selectedMask.name), /*#__PURE__*/React.createElement("div", {
-    className: "text-white/90 text-sm"
-  }, "\u05D6\u05D4\u05D5\u05EA\u05DA \u05D4\u05D0\u05DE\u05D9\u05EA\u05D9\u05EA \u05DE\u05D5\u05E1\u05EA\u05E8\u05EA \u05DE\u05DB\u05D5\u05DC\u05DD (\u05DE\u05E0\u05D4\u05DC\u05D9\u05DD \u05D9\u05DB\u05D5\u05DC\u05D9\u05DD \u05DC\u05E8\u05D0\u05D5\u05EA \u05DC\u05DE\u05D8\u05E8\u05D5\u05EA \u05E0\u05D9\u05D4\u05D5\u05DC \u05D1\u05DC\u05D1\u05D3)"))), /*#__PURE__*/React.createElement("button", {
+    className: "text-2xl md:text-3xl flex-shrink-0"
+  }, selectedMask.emoji), /*#__PURE__*/React.createElement("div", {
+    className: "min-w-0"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "font-bold text-white text-base md:text-lg"
+  }, "\u05DE\u05E6\u05D1 \u05D0\u05E0\u05D5\u05E0\u05D9\u05DE\u05D9 \u05E4\u05E2\u05D9\u05DC - ", selectedMask.name), /*#__PURE__*/React.createElement("div", {
+    className: "text-white/90 text-xs md:text-sm"
+  }, "\u05D6\u05D4\u05D5\u05EA\u05DA \u05D4\u05D0\u05DE\u05D9\u05EA\u05D9\u05EA \u05DE\u05D5\u05E1\u05EA\u05E8\u05EA \u05DE\u05DB\u05D5\u05DC\u05DD"))), /*#__PURE__*/React.createElement("button", {
     onClick: () => toggleMaskMode(null),
-    className: "px-6 py-3 bg-white/20 hover:bg-white/30 text-white font-bold rounded-xl transition-all shadow-lg whitespace-nowrap backdrop-blur-sm"
-  }, "\u05D1\u05D8\u05DC \u05DE\u05E1\u05DB\u05D4")), showPartyAnnouncement && /*#__PURE__*/React.createElement("div", {
-    className: "bg-gradient-to-r from-purple-600 via-pink-600 to-purple-600 px-8 py-4 flex items-center justify-between relative overflow-hidden animate-pulse"
+    className: "w-full md:w-auto px-4 md:px-6 py-2 md:py-3 bg-white/20 hover:bg-white/30 text-white font-bold rounded-xl shadow-lg whitespace-nowrap backdrop-blur-sm text-sm md:text-base"
+  }, "\u05D1\u05D8\u05DC \u05DE\u05E6\u05D1 \u05D0\u05E0\u05D5\u05E0\u05D9\u05DE\u05D9")), showPartyAnnouncement && /*#__PURE__*/React.createElement("div", {
+    className: "bg-gradient-to-r from-purple-600 via-pink-600 to-purple-600 px-4 md:px-8 py-3 md:py-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-3 relative overflow-hidden"
   }, /*#__PURE__*/React.createElement("div", {
     className: "absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent animate-pulse"
   }), /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center gap-4 relative z-10"
+    className: "flex items-center gap-3 md:gap-4 relative z-10 min-w-0"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "w-16 h-16 bg-white/20 backdrop-blur-sm rounded-2xl flex items-center justify-center text-4xl animate-bounce"
-  }, "\uD83C\uDF89"), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-    className: "font-black text-white text-2xl mb-1",
+    className: "w-10 h-10 md:w-16 md:h-16 bg-white/20 backdrop-blur-sm rounded-xl md:rounded-2xl flex items-center justify-center text-2xl md:text-4xl flex-shrink-0 animate-bounce"
+  }, "\uD83C\uDF89"), /*#__PURE__*/React.createElement("div", {
+    className: "min-w-0"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "font-black text-white text-base md:text-2xl mb-0.5 md:mb-1",
     style: {
       textShadow: '0 2px 10px rgba(0,0,0,0.5)',
       fontStyle: 'italic'
     }
   }, "\u05DE\u05E1\u05D9\u05D1\u05EA \u05E7\u05D4\u05D9\u05DC\u05D4 \u05D4\u05E2\u05E8\u05D1!"), /*#__PURE__*/React.createElement("div", {
-    className: "text-lg text-white/90 font-semibold"
+    className: "text-xs md:text-lg text-white/90 font-semibold"
   }, partyAnnouncementText || 'הצטרפו אלינו למסיבה הכי שווה של השבוע!'), /*#__PURE__*/React.createElement("div", {
-    className: "text-sm text-white/80 mt-1"
+    className: "hidden md:block text-sm text-white/80 mt-1"
   }, "\uD83D\uDCCD \u05DC\u05E4\u05E8\u05D8\u05D9\u05DD \u05E0\u05D5\u05E1\u05E4\u05D9\u05DD \u05D1\u05E7\u05E8\u05D5 \u05D1\u05D0\u05EA\u05E8 \u05D0\u05D5 \u05D1\u05D7\u05D3\u05E8 \u05D4\u05DE\u05E1\u05D9\u05D1\u05D5\u05EA"))), /*#__PURE__*/React.createElement("a", {
     href: "https://talkingbdsm.net",
     target: "_blank",
     rel: "noopener noreferrer",
-    className: "relative z-10 px-8 py-4 bg-white/20 hover:bg-white/30 backdrop-blur-sm rounded-2xl border-2 border-white/30 transform hover:scale-105 transition-all"
+    className: "relative z-10 px-4 md:px-8 py-2 md:py-4 bg-white/20 hover:bg-white/30 backdrop-blur-sm rounded-xl md:rounded-2xl border-2 border-white/30 self-stretch md:self-auto text-center"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "text-white font-black text-xl"
+    className: "text-white font-black text-base md:text-xl"
   }, "\u05E4\u05E8\u05D8\u05D9\u05DD \u05DE\u05DC\u05D0\u05D9\u05DD \u2192"))), currentView === 'chat' && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
-    className: "glass-panel px-8 py-5 border-b border-white/5"
+    className: "glass-panel px-4 md:px-8 py-4 md:py-5 border-b border-white/5"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center justify-between"
+    className: "flex items-center justify-between gap-3"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowRoomsSidebar(true),
+    className: "md:hidden p-2 glass-panel rounded-lg hover:bg-white/5 flex-shrink-0",
+    title: "\u05EA\u05E4\u05E8\u05D9\u05D8 \u05D7\u05D3\u05E8\u05D9\u05DD"
+  }, /*#__PURE__*/React.createElement("svg", {
+    xmlns: "http://www.w3.org/2000/svg",
+    width: "24",
+    height: "24",
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "2",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("line", {
+    x1: "3",
+    y1: "6",
+    x2: "21",
+    y2: "6"
+  }), /*#__PURE__*/React.createElement("line", {
+    x1: "3",
+    y1: "12",
+    x2: "21",
+    y2: "12"
+  }), /*#__PURE__*/React.createElement("line", {
+    x1: "3",
+    y1: "18",
+    x2: "21",
+    y2: "18"
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "flex-1 min-w-0"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "flex-1"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center gap-4 mb-2"
+    className: "flex items-center gap-2 md:gap-4 mb-1 md:mb-2 flex-wrap"
   }, /*#__PURE__*/React.createElement("h1", {
-    className: "text-3xl font-bold text-white"
+    className: "text-xl md:text-3xl font-bold text-white truncate"
   }, currentRoom), /*#__PURE__*/React.createElement("span", {
-    className: "px-3 py-1 bg-red-600/20 border border-red-600/30 rounded-full text-sm text-red-400"
+    className: "hidden sm:inline-block px-3 py-1 bg-red-600/20 border border-red-600/30 rounded-full text-sm text-red-400 truncate"
   }, currentRoomData?.description)), /*#__PURE__*/React.createElement("p", {
-    className: "text-sm text-gray-400"
-  }, onlineUsers.length, " \u05DE\u05E9\u05EA\u05DE\u05E9\u05D9\u05DD \u05DE\u05D7\u05D5\u05D1\u05E8\u05D9\u05DD")), /*#__PURE__*/React.createElement("button", {
+    className: "text-xs md:text-sm text-gray-400"
+  }, liveOnlineUsers.length, " \u05DE\u05E9\u05EA\u05DE\u05E9\u05D9\u05DD \u05DE\u05D7\u05D5\u05D1\u05E8\u05D9\u05DD")), /*#__PURE__*/React.createElement("button", {
     onClick: () => setShowUsersSidebar(!showUsersSidebar),
-    className: `px-4 py-3 rounded-xl transition-all relative flex items-center gap-2 ${showUsersSidebar ? 'bg-red-600/20 hover:bg-red-600/40 border border-red-600/30' : 'glass-panel hover:bg-white/5'}`,
+    className: `px-3 py-2 md:px-4 md:py-3 rounded-xl transition-all relative flex items-center gap-2 flex-shrink-0 ${showUsersSidebar ? 'bg-red-600/20 hover:bg-red-600/40 border border-red-600/30' : 'glass-panel hover:bg-white/5'}`,
     title: showUsersSidebar ? 'הסתר משתמשים' : 'הצג משתמשים'
   }, /*#__PURE__*/React.createElement(Users, {
     className: "w-5 h-5"
   }), /*#__PURE__*/React.createElement("span", {
-    className: "font-medium"
+    className: "hidden md:inline font-medium"
   }, "\u05DE\u05E9\u05EA\u05DE\u05E9\u05D9\u05DD \u05DE\u05D7\u05D5\u05D1\u05E8\u05D9\u05DD"), !showUsersSidebar && onlineUsers.length > 0 && /*#__PURE__*/React.createElement("span", {
     className: "bg-red-600 text-white text-xs font-bold rounded-full px-2 py-0.5"
   }, onlineUsers.length)))), isInCall && /*#__PURE__*/React.createElement("div", {
@@ -1325,35 +1511,30 @@ const BDSMChat = () => {
     rel: "noopener noreferrer",
     className: "block max-w-2xl mx-auto"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "glass-panel p-6 rounded-2xl hover:bg-white/10 transition-all group cursor-pointer border border-red-600/30"
+    className: "glass-panel p-3 md:p-6 rounded-2xl hover:bg-white/10 transition-all group cursor-pointer border border-red-600/30"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center gap-4"
+    className: "flex items-center gap-3 md:gap-4"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "w-14 h-14 bg-gradient-to-br from-red-600 to-red-800 rounded-2xl flex items-center justify-center text-3xl flex-shrink-0 group-hover:scale-110 transition-transform"
+    className: "w-10 h-10 md:w-14 md:h-14 bg-gradient-to-br from-red-600 to-red-800 rounded-xl md:rounded-2xl flex items-center justify-center text-xl md:text-3xl flex-shrink-0 group-hover:scale-110 transition-transform"
   }, "\uD83C\uDF10"), /*#__PURE__*/React.createElement("div", {
-    className: "flex-1 text-right"
+    className: "flex-1 text-right min-w-0"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "text-xl font-bold text-white mb-1 group-hover:text-red-400 transition-colors"
+    className: "text-base md:text-xl font-bold text-white mb-0.5 md:mb-1 group-hover:text-red-400 transition-colors"
   }, "\u05D1\u05E7\u05E8\u05D5 \u05D1\u05D0\u05EA\u05E8 \u05D4\u05DE\u05DC\u05D0 \u05E9\u05DC\u05E0\u05D5"), /*#__PURE__*/React.createElement("div", {
-    className: "text-sm text-gray-400"
-  }, "\u05DE\u05E1\u05D9\u05D1\u05D5\u05EA \u05E7\u05D4\u05D9\u05DC\u05EA\u05D9\u05D5\u05EA \u2022 \u05D7\u05E0\u05D5\u05EA \u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u2022 \u05DE\u05D3\u05E8\u05D9\u05DB\u05D9\u05DD \u05D5\u05DE\u05D0\u05DE\u05E8\u05D9\u05DD"), /*#__PURE__*/React.createElement("div", {
-    className: "text-base text-red-400 font-semibold mt-2"
-  }, "\uD83D\uDC49 talkingbdsm.net"))))), pinnedMessages.length > 0 && /*#__PURE__*/React.createElement("div", {
-    className: "bg-yellow-900/20 border border-yellow-600/30 rounded-2xl p-4"
+    className: "text-xs md:text-sm text-gray-400 truncate"
+  }, "\u05DE\u05E1\u05D9\u05D1\u05D5\u05EA \u05E7\u05D4\u05D9\u05DC\u05EA\u05D9\u05D5\u05EA \u2022 \u05D7\u05E0\u05D5\u05EA \u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u2022 \u05DE\u05D3\u05E8\u05D9\u05DB\u05D9\u05DD"), /*#__PURE__*/React.createElement("div", {
+    className: "text-sm md:text-base text-red-400 font-semibold mt-1 md:mt-2"
+  }, "\uD83D\uDC49 talkingbdsm.net"))))), livePinnedMessage && livePinnedMessage.text && /*#__PURE__*/React.createElement("div", {
+    className: "bg-gradient-to-r from-yellow-900/40 to-amber-900/40 border-2 border-yellow-600/50 rounded-2xl p-4 shadow-lg"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center gap-2 mb-3"
+    className: "flex items-center gap-2 mb-2"
   }, /*#__PURE__*/React.createElement("span", {
     className: "text-2xl"
   }, "\uD83D\uDCCC"), /*#__PURE__*/React.createElement("span", {
     className: "font-bold text-yellow-300"
-  }, "\u05D4\u05D5\u05D3\u05E2\u05D5\u05EA \u05E0\u05E2\u05D5\u05E6\u05D5\u05EA")), pinnedMessages.map((msg, idx) => /*#__PURE__*/React.createElement("div", {
-    key: idx,
-    className: "bg-black/30 p-3 rounded-xl mb-2 last:mb-0"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "font-semibold text-yellow-200 text-sm"
-  }, msg.user), /*#__PURE__*/React.createElement("div", {
-    className: "text-white"
-  }, msg.text)))), messages.filter(msg => msg.type === 'system' || msg.room === currentRoom || !msg.room).length === 0 && /*#__PURE__*/React.createElement("div", {
+  }, "\u05D4\u05D5\u05D3\u05E2\u05D4 \u05DE\u05D4\u05DE\u05E0\u05D4\u05DC")), /*#__PURE__*/React.createElement("div", {
+    className: "text-white text-lg whitespace-pre-wrap"
+  }, livePinnedMessage.text)), messages.filter(msg => msg.type === 'system' || msg.room === currentRoom || !msg.room).length === 0 && /*#__PURE__*/React.createElement("div", {
     className: "flex items-center justify-center h-full"
   }, /*#__PURE__*/React.createElement("div", {
     className: "text-center"
@@ -1370,21 +1551,21 @@ const BDSMChat = () => {
   }, msg.text) : /*#__PURE__*/React.createElement("div", {
     className: `flex ${msg.userId === currentUser.id ? 'justify-start' : 'justify-end'} group`
   }, /*#__PURE__*/React.createElement("div", {
-    className: "flex items-start gap-3 max-w-xl relative"
+    className: "flex items-start gap-2 md:gap-3 max-w-[85%] md:max-w-xl relative"
   }, msg.userId !== currentUser.id && /*#__PURE__*/React.createElement("div", {
-    className: `w-10 h-10 ${msg.isMasked ? 'bg-gradient-to-br from-purple-600 to-purple-800' : 'bg-gradient-to-br from-red-600 to-red-800'} rounded-full flex items-center justify-center shadow-lg`
+    className: `w-8 h-8 md:w-10 md:h-10 flex-shrink-0 ${msg.isMasked ? 'bg-gradient-to-br from-purple-600 to-purple-800' : 'bg-gradient-to-br from-red-600 to-red-800'} rounded-full flex items-center justify-center shadow-lg text-sm md:text-base`
   }, msg.type === 'ai' ? '🤖' : msg.isMasked ? '🎭' : '👤'), /*#__PURE__*/React.createElement("div", {
-    className: `px-5 py-3 rounded-2xl ${msg.userId === currentUser.id ? 'bg-red-600 shadow-lg' : msg.type === 'ai' ? 'bg-red-700/80' : 'bg-black/60 border border-red-600/20'}`
+    className: `px-3 md:px-5 py-2 md:py-3 rounded-2xl min-w-0 ${msg.userId === currentUser.id ? 'bg-red-600 shadow-lg' : msg.type === 'ai' ? 'bg-red-700/80' : 'bg-black/60 border border-red-600/20'}`
   }, /*#__PURE__*/React.createElement("div", {
-    className: "font-semibold text-sm mb-1 flex items-center gap-2"
+    className: "font-semibold text-xs md:text-sm mb-1 flex items-center gap-2 flex-wrap"
   }, msg.user, msg.isMasked && /*#__PURE__*/React.createElement("span", {
     className: "text-xs bg-purple-600/30 px-2 py-0.5 rounded"
   }, "\u05DE\u05D5\u05E1\u05EA\u05E8")), /*#__PURE__*/React.createElement("div", {
-    className: "text-white"
+    className: "text-white break-words whitespace-pre-wrap text-sm md:text-base"
   }, msg.text), /*#__PURE__*/React.createElement("div", {
-    className: "text-xs text-gray-300 mt-2"
+    className: "text-xs text-gray-300 mt-1 md:mt-2"
   }, msg.timestamp)), msg.userId === currentUser.id && /*#__PURE__*/React.createElement("div", {
-    className: `w-10 h-10 ${msg.isMasked ? 'bg-gradient-to-br from-purple-600 to-purple-800' : 'bg-gradient-to-br from-red-600 to-red-800'} rounded-full flex items-center justify-center shadow-lg`
+    className: `w-8 h-8 md:w-10 md:h-10 flex-shrink-0 ${msg.isMasked ? 'bg-gradient-to-br from-purple-600 to-purple-800' : 'bg-gradient-to-br from-red-600 to-red-800'} rounded-full flex items-center justify-center shadow-lg text-sm md:text-base`
   }, msg.isMasked ? '🎭' : '👤'), currentUser?.role === 'admin' && msg.type !== 'system' && /*#__PURE__*/React.createElement("div", {
     className: "absolute -left-2 top-0 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1"
   }, /*#__PURE__*/React.createElement("button", {
@@ -1408,13 +1589,13 @@ const BDSMChat = () => {
   }, "\u05DE\u05E7\u05DC\u05D9\u05D3...")))), /*#__PURE__*/React.createElement("div", {
     ref: messagesEndRef
   })), /*#__PURE__*/React.createElement("div", {
-    className: "bg-black/70 backdrop-blur-md border-t border-red-600/30 px-8 py-5"
+    className: "bg-black/70 backdrop-blur-md border-t border-red-600/30 px-3 md:px-8 py-3 md:py-5 pb-safe"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "flex gap-3"
+    className: "flex gap-2 md:gap-3"
   }, /*#__PURE__*/React.createElement("button", {
     onClick: sendMessage,
     disabled: isLoading,
-    className: "px-6 py-4 bg-red-600 hover:bg-red-700 disabled:opacity-50 rounded-xl shadow-lg"
+    className: "px-4 md:px-6 py-3 md:py-4 bg-red-600 hover:bg-red-700 disabled:opacity-50 rounded-xl shadow-lg flex-shrink-0"
   }, /*#__PURE__*/React.createElement(Send, {
     className: "w-5 h-5"
   })), /*#__PURE__*/React.createElement("input", {
@@ -1424,7 +1605,8 @@ const BDSMChat = () => {
     onChange: e => setNewMessage(e.target.value),
     onKeyPress: e => e.key === 'Enter' && !isLoading && sendMessage(),
     disabled: isLoading,
-    className: "flex-1 px-5 py-4 bg-black/50 border border-red-600/30 rounded-xl text-white text-lg placeholder-gray-500 focus:outline-none focus:border-red-500 disabled:opacity-50"
+    className: "flex-1 px-4 md:px-5 py-3 md:py-4 bg-black/50 border border-red-600/30 rounded-xl text-white text-base md:text-lg placeholder-gray-500 focus:outline-none focus:border-red-500 disabled:opacity-50 text-right min-w-0",
+    dir: "rtl"
   })))), currentView === 'admin' && currentUser.role === 'admin' && /*#__PURE__*/React.createElement("div", {
     className: "flex-1 overflow-y-auto p-8"
   }, /*#__PURE__*/React.createElement("h2", {
@@ -1563,7 +1745,7 @@ const BDSMChat = () => {
     className: "font-semibold text-white"
   }, user.username, user.maskMode && user.selectedMask && /*#__PURE__*/React.createElement("span", {
     className: "text-xs text-purple-400 mr-2"
-  }, "(\u05D1\u05DE\u05E1\u05DB\u05D4: ", user.selectedMask.emoji, " ", user.selectedMask.name, ")")), /*#__PURE__*/React.createElement("div", {
+  }, "(\u05D1\u05DE\u05E6\u05D1 \u05D0\u05E0\u05D5\u05E0\u05D9\u05DE\u05D9: ", user.selectedMask.emoji, " ", user.selectedMask.name, ")")), /*#__PURE__*/React.createElement("div", {
     className: "text-sm text-gray-400"
   }, user.online && /*#__PURE__*/React.createElement("span", {
     className: "text-green-400"
@@ -1589,7 +1771,7 @@ const BDSMChat = () => {
     className: "mt-4 p-3 bg-purple-900/20 border border-purple-500/30 rounded-lg"
   }, /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-purple-300"
-  }, "\uD83D\uDCA1 ", /*#__PURE__*/React.createElement("strong", null, "\u05D4\u05E2\u05E8\u05D4:"), " \u05DB\u05DE\u05E0\u05D4\u05DC, \u05D0\u05EA\u05D4 \u05D9\u05DB\u05D5\u05DC \u05DC\u05E8\u05D0\u05D5\u05EA \u05D0\u05EA \u05D4\u05D6\u05D4\u05D5\u05EA \u05D4\u05D0\u05DE\u05D9\u05EA\u05D9\u05EA \u05DE\u05D0\u05D7\u05D5\u05E8\u05D9 \u05DE\u05E1\u05DB\u05D5\u05EA. \u05DE\u05E9\u05EA\u05DE\u05E9\u05D9\u05DD \u05E8\u05D2\u05D9\u05DC\u05D9\u05DD \u05E8\u05D5\u05D0\u05D9\u05DD \u05E8\u05E7 \u05D0\u05EA \u05D4\u05DE\u05E1\u05DB\u05D4."))), /*#__PURE__*/React.createElement("div", {
+  }, "\uD83D\uDCA1 ", /*#__PURE__*/React.createElement("strong", null, "\u05D4\u05E2\u05E8\u05D4:"), " \u05DB\u05DE\u05E0\u05D4\u05DC, \u05D0\u05EA\u05D4 \u05D9\u05DB\u05D5\u05DC \u05DC\u05E8\u05D0\u05D5\u05EA \u05D0\u05EA \u05D4\u05D6\u05D4\u05D5\u05EA \u05D4\u05D0\u05DE\u05D9\u05EA\u05D9\u05EA \u05DE\u05D0\u05D7\u05D5\u05E8\u05D9 \u05D3\u05DE\u05D5\u05D9\u05D5\u05EA \u05D0\u05E0\u05D5\u05E0\u05D9\u05DE\u05D9\u05D5\u05EA. \u05DE\u05E9\u05EA\u05DE\u05E9\u05D9\u05DD \u05E8\u05D2\u05D9\u05DC\u05D9\u05DD \u05E8\u05D5\u05D0\u05D9\u05DD \u05E8\u05E7 \u05D0\u05EA \u05D4\u05D3\u05DE\u05D5\u05EA."))), /*#__PURE__*/React.createElement("div", {
     className: "bg-black/50 backdrop-blur-md border border-red-600/30 rounded-2xl p-6"
   }, /*#__PURE__*/React.createElement("h3", {
     className: "text-xl font-bold text-white mb-4"
@@ -1617,47 +1799,65 @@ const BDSMChat = () => {
   }, log.timestamp)))))))), currentView === 'private' && /*#__PURE__*/React.createElement("div", {
     className: "flex-1 flex flex-col"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "bg-black/70 backdrop-blur-md border-b border-red-600/30 px-8 py-5 flex items-center justify-between"
-  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h1", {
-    className: "text-2xl font-bold text-white"
-  }, "\u05E6'\u05D0\u05D8 \u05E4\u05E8\u05D8\u05D9 \u05E2\u05DD ", activePrivateChat)), /*#__PURE__*/React.createElement("button", {
+    className: "bg-black/70 backdrop-blur-md border-b border-red-600/30 px-4 md:px-8 py-3 md:py-5 flex items-center justify-between gap-3"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "min-w-0 flex-1"
+  }, /*#__PURE__*/React.createElement("h1", {
+    className: "text-lg md:text-2xl font-bold text-white truncate"
+  }, "\u05E6'\u05D0\u05D8 \u05E4\u05E8\u05D8\u05D9 \u05E2\u05DD ", activePrivateChat), /*#__PURE__*/React.createElement("p", {
+    className: "hidden md:block text-xs text-gray-400 mt-1"
+  }, "\u05D4\u05D5\u05D3\u05E2\u05D5\u05EA \u05E4\u05E8\u05D8\u05D9\u05D5\u05EA \u05E0\u05E8\u05D0\u05D5\u05EA \u05E8\u05E7 \u05DC\u05E9\u05E0\u05D9\u05DB\u05DD")), /*#__PURE__*/React.createElement("button", {
     onClick: () => setCurrentView('chat'),
-    className: "px-4 py-2 bg-black/50 rounded-lg hover:bg-black/70"
+    className: "px-3 md:px-4 py-2 bg-black/50 rounded-lg hover:bg-black/70 flex-shrink-0"
   }, /*#__PURE__*/React.createElement(X, {
     className: "w-5 h-5"
   }))), /*#__PURE__*/React.createElement("div", {
-    className: "flex-1 overflow-y-auto p-4 space-y-3"
+    className: "flex-1 overflow-y-auto p-3 md:p-4 space-y-3"
   }, (() => {
-    const chatKey = [currentUser.username, activePrivateChat].sort().join('-');
-    const msgs = privateChats[chatKey] || [];
-    return msgs.map((msg, idx) => /*#__PURE__*/React.createElement("div", {
-      key: idx,
+    const msgs = livePrivateMessages.filter(m => m.from === currentUser.username && m.to === activePrivateChat || m.to === currentUser.username && m.from === activePrivateChat);
+    if (msgs.length === 0) {
+      return /*#__PURE__*/React.createElement("div", {
+        className: "flex items-center justify-center h-full"
+      }, /*#__PURE__*/React.createElement("div", {
+        className: "text-center"
+      }, /*#__PURE__*/React.createElement("div", {
+        className: "text-5xl md:text-6xl mb-4"
+      }, "\uD83D\uDCAC"), /*#__PURE__*/React.createElement("p", {
+        className: "text-gray-400 text-sm md:text-base"
+      }, "\u05E2\u05D5\u05D3 \u05D0\u05D9\u05DF \u05D4\u05D5\u05D3\u05E2\u05D5\u05EA. \u05E9\u05DC\u05D7 \u05D0\u05EA \u05D4\u05E8\u05D0\u05E9\u05D5\u05E0\u05D4!")));
+    }
+    return msgs.map(msg => /*#__PURE__*/React.createElement("div", {
+      key: msg._firestoreId || msg.from + msg.timestamp,
       className: `flex ${msg.from === currentUser.username ? 'justify-start' : 'justify-end'}`
     }, /*#__PURE__*/React.createElement("div", {
-      className: `px-5 py-3 rounded-2xl max-w-xl ${msg.from === currentUser.username ? 'bg-red-600' : 'bg-black/60 border border-red-600/20'}`
+      className: `px-4 md:px-5 py-2 md:py-3 rounded-2xl max-w-[85%] md:max-w-xl ${msg.from === currentUser.username ? 'bg-red-600' : 'bg-black/60 border border-red-600/20'}`
     }, /*#__PURE__*/React.createElement("div", {
-      className: "text-white"
+      className: "text-white whitespace-pre-wrap break-words text-sm md:text-base"
     }, msg.text), /*#__PURE__*/React.createElement("div", {
-      className: "text-xs text-gray-300 mt-2"
+      className: "text-xs text-gray-300 mt-1 md:mt-2"
     }, msg.timestamp))));
   })()), /*#__PURE__*/React.createElement("div", {
-    className: "bg-black/70 backdrop-blur-md border-t border-red-600/30 px-8 py-5"
+    className: "bg-black/70 backdrop-blur-md border-t border-red-600/30 px-3 md:px-8 py-3 md:py-5"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "flex gap-3"
+    className: "flex gap-2 md:gap-3"
   }, /*#__PURE__*/React.createElement("button", {
     onClick: sendPrivateMessage,
-    className: "px-6 py-4 bg-red-600 hover:bg-red-700 rounded-xl"
+    className: "px-4 md:px-6 py-3 md:py-4 bg-red-600 hover:bg-red-700 rounded-xl flex-shrink-0"
   }, /*#__PURE__*/React.createElement(Send, {
     className: "w-5 h-5"
   })), /*#__PURE__*/React.createElement("input", {
     type: "text",
-    placeholder: "\u05D4\u05D5\u05D3\u05E2\u05D4 \u05E4\u05E8\u05D8\u05D9\u05EA...",
+    placeholder: `הודעה פרטית ל-${activePrivateChat}...`,
     value: privateMessage,
     onChange: e => setPrivateMessage(e.target.value),
     onKeyPress: e => e.key === 'Enter' && sendPrivateMessage(),
-    className: "flex-1 px-5 py-4 bg-black/50 border border-red-600/30 rounded-xl text-white text-lg placeholder-gray-500 focus:outline-none focus:border-red-500"
-  }))))), /*#__PURE__*/React.createElement("div", {
-    className: `fixed top-0 left-0 h-screen w-80 glass-panel border-r border-white/5 z-50 transform transition-transform duration-300 ease-in-out ${showUsersSidebar ? 'translate-x-0' : '-translate-x-full'}`
+    className: "flex-1 px-4 md:px-5 py-3 md:py-4 bg-black/50 border border-red-600/30 rounded-xl text-white text-base md:text-lg placeholder-gray-500 focus:outline-none focus:border-red-500 text-right min-w-0",
+    dir: "rtl"
+  }))))), showUsersSidebar && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setShowUsersSidebar(false),
+    className: "md:hidden fixed inset-0 bg-black/60 z-40"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: `fixed top-0 left-0 h-screen w-full sm:w-80 glass-panel border-r border-white/5 z-50 transform transition-transform duration-300 ease-in-out ${showUsersSidebar ? 'translate-x-0' : '-translate-x-full'}`
   }, /*#__PURE__*/React.createElement("div", {
     className: "p-6 h-full flex flex-col overflow-y-auto"
   }, /*#__PURE__*/React.createElement("div", {
@@ -1675,18 +1875,16 @@ const BDSMChat = () => {
     className: "text-sm text-gray-400"
   }, onlineUsers.length, " \u05D0\u05D5\u05E0\u05DC\u05D9\u05D9\u05DF \u05DB\u05E8\u05D2\u05E2")), /*#__PURE__*/React.createElement("div", {
     className: "space-y-3 flex-1 overflow-y-auto"
-  }, onlineUsers.map(user => /*#__PURE__*/React.createElement("div", {
-    key: user.id,
+  }, liveOnlineUsers.filter(u => u.nickname !== currentUser?.username).map(user => /*#__PURE__*/React.createElement("div", {
+    key: user._id || user.nickname,
     className: "px-4 py-3 bg-black/50 border border-red-600/20 rounded-xl flex items-center gap-3"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "w-11 h-11 bg-gradient-to-br from-red-600 to-red-800 rounded-full flex items-center justify-center shadow-lg"
-  }, user.role === 'guest' ? '👻' : '👤'), /*#__PURE__*/React.createElement("div", {
-    className: "flex-1"
+    className: "w-11 h-11 bg-gradient-to-br from-red-600 to-red-800 rounded-full flex items-center justify-center shadow-lg text-lg"
+  }, "\uD83D\uDC64"), /*#__PURE__*/React.createElement("div", {
+    className: "flex-1 min-w-0"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "font-semibold text-white"
-  }, user.username, user.role === 'guest' && /*#__PURE__*/React.createElement("span", {
-    className: "text-xs text-yellow-400 mr-2"
-  }, "(\u05D0\u05D5\u05E8\u05D7)")), /*#__PURE__*/React.createElement("div", {
+    className: "font-semibold text-white truncate"
+  }, user.nickname), /*#__PURE__*/React.createElement("div", {
     className: "flex items-center gap-2 text-xs"
   }, /*#__PURE__*/React.createElement("div", {
     className: "w-2 h-2 bg-green-400 rounded-full animate-pulse"
@@ -1695,30 +1893,22 @@ const BDSMChat = () => {
   }, "\u05DE\u05D7\u05D5\u05D1\u05E8"))), /*#__PURE__*/React.createElement("div", {
     className: "flex gap-1"
   }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => startPrivateChat(user.username),
-    className: `p-2 rounded-lg transition-all ${isGuest ? 'bg-gray-600/20 cursor-not-allowed opacity-50' : 'bg-blue-600/20 hover:bg-blue-600'}`,
-    title: isGuest ? 'זמין רק למשתמשים רשומים' : 'הודעה פרטית',
-    disabled: isGuest
+    onClick: () => {
+      setActivePrivateChat(user.nickname);
+      setCurrentView('private');
+      setShowUsersSidebar(false);
+    },
+    className: "p-2 rounded-lg bg-blue-600/20 hover:bg-blue-600 transition-all",
+    title: "\u05E9\u05DC\u05D7 \u05D4\u05D5\u05D3\u05E2\u05D4 \u05E4\u05E8\u05D8\u05D9\u05EA"
   }, /*#__PURE__*/React.createElement(MessageSquare, {
     className: "w-4 h-4"
-  }), isGuest && /*#__PURE__*/React.createElement("span", {
-    className: "text-xs"
-  }, "\uD83D\uDD12")), /*#__PURE__*/React.createElement("button", {
-    onClick: () => startVideoCall(user.username),
-    className: `p-2 rounded-lg transition-all ${isGuest ? 'bg-gray-600/20 cursor-not-allowed opacity-50' : 'bg-green-600/20 hover:bg-green-600'}`,
-    title: isGuest ? 'זמין רק למשתמשים רשומים' : 'שיחת וידאו',
-    disabled: isGuest
-  }, /*#__PURE__*/React.createElement(Video, {
-    className: "w-4 h-4"
-  }), isGuest && /*#__PURE__*/React.createElement("span", {
-    className: "text-xs"
-  }, "\uD83D\uDD12"))))), onlineUsers.length === 0 && /*#__PURE__*/React.createElement("div", {
+  }))))), liveOnlineUsers.filter(u => u.nickname !== currentUser?.username).length === 0 && /*#__PURE__*/React.createElement("div", {
     className: "text-center text-gray-500 py-12"
   }, /*#__PURE__*/React.createElement("div", {
     className: "text-5xl mb-2"
   }, "\uD83D\uDC65"), /*#__PURE__*/React.createElement("p", {
     className: "text-sm"
-  }, "\u05D0\u05D9\u05DF \u05DE\u05E9\u05EA\u05DE\u05E9\u05D9\u05DD \u05DE\u05D7\u05D5\u05D1\u05E8\u05D9\u05DD")))))));
+  }, "\u05D0\u05D9\u05DF \u05DE\u05E9\u05EA\u05DE\u05E9\u05D9\u05DD \u05D0\u05D7\u05E8\u05D9\u05DD \u05DE\u05D7\u05D5\u05D1\u05E8\u05D9\u05DD")))))));
 };
 
 const root = ReactDOM.createRoot(document.getElementById('root'));

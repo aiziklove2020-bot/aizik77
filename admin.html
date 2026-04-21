@@ -2,7 +2,7 @@
 <html lang="he" dir="rtl">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>ניהול - BDSM Chat</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -11,11 +11,14 @@
   <style>
     * { font-family: 'Assistant', sans-serif; }
     body { margin: 0; background: #000; color: #fff; }
-    #root { min-height: 100vh; }
+    #root { min-height: 100vh; min-height: 100dvh; }
     .glass-panel { background: rgba(10,10,10,0.6); backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.05); }
     .loader { display: flex; align-items: center; justify-content: center; height: 100vh; color: #888; flex-direction: column; gap: 16px; }
     .spinner { width: 40px; height: 40px; border: 3px solid #333; border-top-color: #cc0000; border-radius: 50%; animation: spin 1s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
+    @media (max-width: 767px) {
+      input, textarea { font-size: 16px !important; }
+    }
   </style>
 </head>
 <body>
@@ -105,6 +108,43 @@
       await deleteDoc(doc(db, 'chatNicknames', key));
     };
 
+    // Clear all messages in chat (all rooms)
+    window.adminClearAllMessages = async () => {
+      const snapshot = await getDocs(collection(db, 'chatMessages'));
+      const deletions = snapshot.docs.map(d => deleteDoc(doc(db, 'chatMessages', d.id)));
+      await Promise.all(deletions);
+      return snapshot.docs.length;
+    };
+
+    // Clear all messages in a specific room
+    window.adminClearRoom = async (roomName) => {
+      const q = query(collection(db, 'chatMessages'), where('room', '==', roomName));
+      const snapshot = await getDocs(q);
+      const deletions = snapshot.docs.map(d => deleteDoc(doc(db, 'chatMessages', d.id)));
+      await Promise.all(deletions);
+      return snapshot.docs.length;
+    };
+
+    // Pin a message to the top of the chat (visible to everyone)
+    window.adminPinMessage = async (text) => {
+      await setDoc(doc(db, 'chatPinned', 'current'), {
+        text: text || '',
+        pinnedAt: serverTimestamp()
+      });
+    };
+
+    // Remove the pinned message
+    window.adminUnpinMessage = async () => {
+      await deleteDoc(doc(db, 'chatPinned', 'current'));
+    };
+
+    // Subscribe to current pinned message (to show it in admin panel)
+    window.adminSubscribePinned = (callback) => {
+      return onSnapshot(doc(db, 'chatPinned', 'current'), (snap) => {
+        callback(snap.exists() ? snap.data() : null);
+      });
+    };
+
     window.adminLog = async (action) => {
       await addDoc(collection(db, 'chatAdminLogs'), {
         action: action,
@@ -148,9 +188,9 @@
         };
 
         return e('div', { className: 'min-h-screen bg-black flex items-center justify-center p-4' },
-          e('div', { className: 'glass-panel p-10 rounded-3xl max-w-md w-full' },
-            e('div', { className: 'text-center mb-8' },
-              e('div', { className: 'text-5xl font-black italic', style: { color: '#CC0000' } }, '🛡️ ניהול'),
+          e('div', { className: 'glass-panel p-6 md:p-10 rounded-3xl max-w-md w-full' },
+            e('div', { className: 'text-center mb-6 md:mb-8' },
+              e('div', { className: 'text-4xl md:text-5xl font-black italic', style: { color: '#CC0000' } }, '🛡️ ניהול'),
               e('div', { className: 'text-white text-sm mt-2' }, 'פאנל ניהול מדברים בדסמ')
             ),
             e('div', { className: 'space-y-4' },
@@ -194,12 +234,19 @@
         const [messages, setMessages] = useState([]);
         const [online, setOnline] = useState([]);
         const [bans, setBans] = useState([]);
+        const [pinnedMsg, setPinnedMsg] = useState(null);
+        const [pinInput, setPinInput] = useState('');
+        const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
         useEffect(() => {
           const u1 = window.adminSubscribeMessages(setMessages);
           const u2 = window.adminSubscribeOnline(setOnline);
           const u3 = window.adminSubscribeBans(setBans);
-          return () => { u1(); u2(); u3(); };
+          const u4 = window.adminSubscribePinned((p) => {
+            setPinnedMsg(p);
+            setPinInput(p && p.text ? p.text : '');
+          });
+          return () => { u1(); u2(); u3(); u4(); };
         }, []);
 
         const doLogout = () => {
@@ -212,6 +259,16 @@
           try {
             await window.adminDeleteMessage(msg._firestoreId);
             await window.adminLog('מחק הודעה מ-' + (msg.realUser || msg.user));
+          } catch (e) { alert('שגיאה: ' + e.message); }
+        };
+
+        const confirmClearAll = async () => {
+          if (!window.confirm('⚠️ אזהרה: מחיקת כל ההודעות בצ\'אט (מכל החדרים)!\n\nפעולה זו לא ניתנת לביטול. להמשיך?')) return;
+          if (!window.confirm('בטוח? כל ההודעות של כל המשתמשים יימחקו לצמיתות.')) return;
+          try {
+            const count = await window.adminClearAllMessages();
+            await window.adminLog('מחק את כל הצ\'אט (' + count + ' הודעות)');
+            alert('נמחקו ' + count + ' הודעות');
           } catch (e) { alert('שגיאה: ' + e.message); }
         };
 
@@ -243,6 +300,24 @@
           } catch (e) { alert('שגיאה: ' + e.message); }
         };
 
+        const doPin = async () => {
+          const text = (pinInput || '').trim();
+          if (!text) { alert('הזן טקסט להודעה הנעוצה'); return; }
+          try {
+            await window.adminPinMessage(text);
+            await window.adminLog('נעץ הודעה: "' + text.substring(0, 40) + '"');
+            alert('ההודעה נעוצה! כעת כל המשתמשים רואים אותה בראש הצ\'אט');
+          } catch (e) { alert('שגיאה: ' + e.message); }
+        };
+
+        const doUnpin = async () => {
+          if (!window.confirm('להסיר את ההודעה הנעוצה?')) return;
+          try {
+            await window.adminUnpinMessage();
+            await window.adminLog('הסיר הודעה נעוצה');
+          } catch (e) { alert('שגיאה: ' + e.message); }
+        };
+
         const todayCount = messages.filter(m => {
           if (!m.createdAt || !m.createdAt.seconds) return false;
           return (Date.now() - m.createdAt.seconds * 1000) < 24 * 60 * 60 * 1000;
@@ -253,9 +328,33 @@
           messagesByRoom[m.room || 'כללי'] = (messagesByRoom[m.room || 'כללי'] || 0) + 1;
         });
 
-        return e('div', { className: 'min-h-screen bg-black text-white flex' },
-          // Sidebar
-          e('div', { className: 'w-64 bg-black/80 border-l border-red-600/20 p-6 flex flex-col' },
+        return e('div', { className: 'min-h-screen bg-black text-white flex flex-col md:flex-row' },
+          // Mobile header (visible only on mobile)
+          e('div', { className: 'md:hidden sticky top-0 z-40 bg-black/90 backdrop-blur-md border-b border-red-600/20 px-4 py-3 flex items-center justify-between' },
+            e('div', { className: 'text-2xl font-black italic', style: { color: '#CC0000' } }, '🛡️ ניהול'),
+            e('button', {
+              onClick: () => setMobileMenuOpen(!mobileMenuOpen),
+              className: 'p-2 glass-panel rounded-lg'
+            },
+              e('svg', { xmlns: 'http://www.w3.org/2000/svg', width: 24, height: 24, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2 },
+                e('line', { x1: 3, y1: 6, x2: 21, y2: 6 }),
+                e('line', { x1: 3, y1: 12, x2: 21, y2: 12 }),
+                e('line', { x1: 3, y1: 18, x2: 21, y2: 18 })
+              )
+            )
+          ),
+
+          // Mobile overlay
+          mobileMenuOpen && e('div', {
+            onClick: () => setMobileMenuOpen(false),
+            className: 'md:hidden fixed inset-0 bg-black/70 z-40'
+          }),
+
+          // Sidebar — drawer on mobile, static on desktop
+          e('div', {
+            className: 'fixed md:static top-0 right-0 h-screen w-72 md:w-64 bg-black/95 md:bg-black/80 border-l border-red-600/20 p-6 flex flex-col z-50 transform transition-transform duration-300 ' +
+                       (mobileMenuOpen ? 'translate-x-0' : 'translate-x-full md:translate-x-0')
+          },
             e('div', { className: 'text-3xl font-black italic mb-2', style: { color: '#CC0000' } }, '🛡️ ניהול'),
             e('div', { className: 'text-gray-400 text-xs mb-8' }, 'מחובר כאדמין'),
             e('nav', { className: 'flex-1 space-y-2' },
@@ -263,10 +362,11 @@
                 { id: 'dashboard', label: '📊 דשבורד' },
                 { id: 'messages', label: '💬 כל ההודעות (' + messages.length + ')' },
                 { id: 'online', label: '🟢 מחוברים (' + online.length + ')' },
-                { id: 'bans', label: '🚫 חסומים (' + bans.length + ')' }
+                { id: 'bans', label: '🚫 חסומים (' + bans.length + ')' },
+                { id: 'pinned', label: '📌 הודעה נעוצה' }
               ].map(t => e('button', {
                 key: t.id,
-                onClick: () => setTab(t.id),
+                onClick: () => { setTab(t.id); setMobileMenuOpen(false); },
                 className: 'w-full px-4 py-3 text-right rounded-xl transition-all ' + (tab === t.id ? 'bg-red-600 text-white' : 'text-gray-300 hover:bg-white/5')
               }, t.label))
             ),
@@ -275,9 +375,9 @@
           ),
 
           // Main content
-          e('div', { className: 'flex-1 p-8 overflow-y-auto' },
+          e('div', { className: 'flex-1 p-4 md:p-8 overflow-y-auto' },
             tab === 'dashboard' && e('div', null,
-              e('h1', { className: 'text-3xl font-bold mb-6' }, 'דשבורד'),
+              e('h1', { className: 'text-2xl md:text-3xl font-bold mb-4 md:mb-6' }, 'דשבורד'),
               e('div', { className: 'grid grid-cols-2 md:grid-cols-4 gap-4 mb-8' },
                 [
                   { label: 'מחוברים עכשיו', value: online.length, color: 'from-green-600 to-emerald-600' },
@@ -305,12 +405,18 @@
             ),
 
             tab === 'messages' && e('div', null,
-              e('h1', { className: 'text-3xl font-bold mb-6' }, 'כל ההודעות'),
+              e('div', { className: 'flex items-center justify-between mb-6' },
+                e('h1', { className: 'text-3xl font-bold' }, 'כל ההודעות'),
+                messages.length > 0 && e('button', {
+                  onClick: confirmClearAll,
+                  className: 'px-5 py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl text-sm font-semibold flex items-center gap-2'
+                }, '🗑️ מחק את כל הצ\'אט')
+              ),
               messages.length === 0 && e('div', { className: 'text-gray-500 text-center py-12' }, 'אין הודעות'),
               e('div', { className: 'space-y-2' },
                 messages.map(msg => e('div', {
                   key: msg._firestoreId,
-                  className: 'glass-panel rounded-xl p-4 flex items-start justify-between gap-4'
+                  className: 'glass-panel rounded-xl p-3 md:p-4 flex flex-col sm:flex-row items-start sm:justify-between gap-3 sm:gap-4'
                 },
                   e('div', { className: 'flex-1' },
                     e('div', { className: 'flex items-center gap-2 mb-1' },
@@ -340,8 +446,37 @@
               )
             ),
 
+            tab === 'pinned' && e('div', null,
+              e('h1', { className: 'text-2xl md:text-3xl font-bold mb-2' }, '📌 הודעה נעוצה'),
+              e('p', { className: 'text-gray-400 mb-6' }, 'ההודעה הנעוצה מופיעה בראש הצ\'אט לכל המשתמשים. שימוש לחוקים, הודעות חשובות, או הכרזות.'),
+              pinnedMsg && pinnedMsg.text && e('div', { className: 'glass-panel rounded-xl p-5 mb-6 bg-yellow-900/20 border border-yellow-600/30' },
+                e('div', { className: 'text-yellow-300 text-sm font-bold mb-2' }, '📌 הודעה נעוצה כרגע:'),
+                e('div', { className: 'text-white text-lg whitespace-pre-wrap' }, pinnedMsg.text),
+                e('button', {
+                  onClick: doUnpin,
+                  className: 'mt-4 px-4 py-2 bg-red-600/20 hover:bg-red-600 text-red-200 hover:text-white rounded-lg text-sm transition-all'
+                }, '🗑️ הסר הודעה נעוצה')
+              ),
+              e('div', { className: 'glass-panel rounded-xl p-6' },
+                e('label', { className: 'block text-sm font-bold text-white mb-3' },
+                  pinnedMsg && pinnedMsg.text ? 'עדכן את ההודעה הנעוצה:' : 'הוסף הודעה נעוצה:'),
+                e('textarea', {
+                  value: pinInput,
+                  onChange: (ev) => setPinInput(ev.target.value),
+                  placeholder: 'לדוגמה: ברוכים הבאים לצ\'אט! נא להתנהג בכבוד...',
+                  rows: 4,
+                  className: 'w-full px-4 py-3 bg-black/50 border border-red-600/30 rounded-xl text-white text-right focus:outline-none focus:border-red-500 resize-none'
+                }),
+                e('button', {
+                  onClick: doPin,
+                  disabled: !pinInput.trim(),
+                  className: 'mt-4 px-6 py-3 bg-red-600 hover:bg-red-700 disabled:bg-gray-700 disabled:cursor-not-allowed text-white rounded-xl font-semibold'
+                }, pinnedMsg && pinnedMsg.text ? '📌 עדכן הודעה נעוצה' : '📌 נעץ הודעה')
+              )
+            ),
+
             tab === 'online' && e('div', null,
-              e('h1', { className: 'text-3xl font-bold mb-6' }, 'משתמשים מחוברים עכשיו'),
+              e('h1', { className: 'text-2xl md:text-3xl font-bold mb-4 md:mb-6' }, 'משתמשים מחוברים עכשיו'),
               online.length === 0 && e('div', { className: 'text-gray-500 text-center py-12' }, 'אין משתמשים מחוברים כרגע'),
               e('div', { className: 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4' },
                 online.map(user => e('div', {
@@ -367,7 +502,7 @@
             ),
 
             tab === 'bans' && e('div', null,
-              e('h1', { className: 'text-3xl font-bold mb-6' }, 'משתמשים חסומים'),
+              e('h1', { className: 'text-2xl md:text-3xl font-bold mb-4 md:mb-6' }, 'משתמשים חסומים'),
               bans.length === 0 && e('div', { className: 'text-gray-500 text-center py-12' }, 'אין חסומים'),
               e('div', { className: 'space-y-2' },
                 bans.map(ban => e('div', {
