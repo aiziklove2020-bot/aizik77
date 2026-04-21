@@ -296,7 +296,7 @@
       window.fbSubscribeOnline = (callback) => {
         const q = query(collection(db, 'chatNicknames'));
         return onSnapshot(q, (snapshot) => {
-          const cutoff = Date.now() - 90 * 1000; // 90 sec stale window
+          const cutoff = Date.now() - 45 * 1000; // 45 sec stale window
           const users = snapshot.docs
             .map(d => Object.assign({}, d.data(), { _id: d.id }))
             .filter(u => u.lastSeenAt && u.lastSeenAt.seconds && (u.lastSeenAt.seconds * 1000) > cutoff);
@@ -790,6 +790,10 @@ const BDSMChat = () => {
           const result = await reclaimFn(parsed.username, parsed.id);
           if (result.ok) {
             const uid = result.userId || parsed.id;
+            // Immediately send heartbeat so user appears online right away
+            if (typeof window.fbHeartbeat === 'function') {
+              window.fbHeartbeat(parsed.username, uid);
+            }
             setCurrentUser({ id: uid, username: parsed.username, password: '', role: parsed.role || 'user', online: true, banned: false });
             setIsLoggedIn(true);
             sessionStorage.setItem('bdsm_chat_user', JSON.stringify({ username: parsed.username, id: uid, role: parsed.role || 'user' }));
@@ -965,13 +969,12 @@ const BDSMChat = () => {
       }
     };
     doHeartbeat();
-    const interval = setInterval(doHeartbeat, 30 * 1000);
+    const interval = setInterval(doHeartbeat, 20 * 1000);
 
-    // Release nickname ONLY when tab is actually closed (not on refresh)
-    // pagehide with persisted=false means the page is being unloaded for real
+    // On tab close: try to release. On refresh: session restore will re-claim immediately.
     const handlePageHide = (e) => {
-      if (!e.persisted && typeof window.fbReleaseNickname === 'function' && currentUser) {
-        try { window.fbReleaseNickname(currentUser.username, currentUser.id); } catch(e) {}
+      if (typeof window.fbReleaseNickname === 'function' && currentUser) {
+        try { window.fbReleaseNickname(currentUser.username, currentUser.id); } catch(err) {}
       }
     };
     window.addEventListener('pagehide', handlePageHide);
