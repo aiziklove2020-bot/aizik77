@@ -734,11 +734,33 @@ const BDSMChat = () => {
   const remoteVideoRef = useRef(null);
   const localStreamRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const messagesContainerRef = useRef(null);
+  const [showScrollBtn, setShowScrollBtn] = useState(false);
+  const isNearBottomRef = useRef(true);
+
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({
-      behavior: 'smooth'
-    });
+    const el = messagesContainerRef.current;
+    if (!el) { messagesEndRef.current?.scrollIntoView({behavior:'smooth'}); return; }
+    if (isNearBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+    } else {
+      setShowScrollBtn(true);
+    }
   }, [messages]);
+
+  const handleScroll = (e) => {
+    const el = e.target;
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    isNearBottomRef.current = distFromBottom < 100;
+    setShowScrollBtn(distFromBottom > 150);
+  };
+
+  const scrollToBottom = () => {
+    const el = messagesContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+    setShowScrollBtn(false);
+    isNearBottomRef.current = true;
+  };
 
   // Nickname-based login. User must type a nickname. Check for bans & uniqueness.
   // Stored in localStorage so refresh doesn't kick them out.
@@ -945,22 +967,17 @@ const BDSMChat = () => {
     doHeartbeat();
     const interval = setInterval(doHeartbeat, 30 * 1000);
 
-    // Release nickname when user closes tab / navigates away
-    const handleUnload = () => {
-      if (typeof window.fbReleaseNickname === 'function' && currentUser) {
-        // Best-effort release. Browsers may not wait for async tasks on unload,
-        // but Firestore SDK uses sendBeacon internally where possible.
-        try {
-          window.fbReleaseNickname(currentUser.username, currentUser.id);
-        } catch (e) {}
+    // Release nickname ONLY when tab is actually closed (not on refresh)
+    // pagehide with persisted=false means the page is being unloaded for real
+    const handlePageHide = (e) => {
+      if (!e.persisted && typeof window.fbReleaseNickname === 'function' && currentUser) {
+        try { window.fbReleaseNickname(currentUser.username, currentUser.id); } catch(e) {}
       }
     };
-    window.addEventListener('pagehide', handleUnload);
-    window.addEventListener('beforeunload', handleUnload);
+    window.addEventListener('pagehide', handlePageHide);
     return () => {
       clearInterval(interval);
-      window.removeEventListener('pagehide', handleUnload);
-      window.removeEventListener('beforeunload', handleUnload);
+      window.removeEventListener('pagehide', handlePageHide);
     };
   }, [isLoggedIn, currentUser]);
 
@@ -1582,7 +1599,7 @@ const BDSMChat = () => {
     onClick: () => toggleMaskMode(null),
     className: "w-full px-3 py-2 mt-3 bg-red-600/20 hover:bg-red-600 border border-red-500/30 rounded-lg text-sm font-medium transition-all"
   }, "\u05D1\u05D8\u05DC \u05DE\u05E6\u05D1 \u05D0\u05E0\u05D5\u05E0\u05D9\u05DE\u05D9"))), /*#__PURE__*/React.createElement("div", {
-    className: "flex-1 overflow-y-auto space-y-3 mb-6"
+    className: "space-y-2 mb-4"
   }, rooms.map(room => /*#__PURE__*/React.createElement("button", {
     key: room.id,
     onClick: () => {
@@ -1601,11 +1618,11 @@ const BDSMChat = () => {
     className: "text-xs text-gray-500"
   }, room.description))))), /*#__PURE__*/React.createElement("button", {
     onClick: handleLogout,
-    className: "w-full px-4 py-3 bg-black/50 hover:bg-red-900/50 border border-red-600/30 rounded-xl flex items-center justify-center gap-2 transition-all"
+    className: "w-full px-4 py-3 mt-3 flex-shrink-0 bg-black/50 hover:bg-red-900/50 border border-red-600/30 rounded-xl flex items-center justify-center gap-2 transition-all"
   }, /*#__PURE__*/React.createElement(LogOut, {
     className: "w-5 h-5"
   }), /*#__PURE__*/React.createElement("span", null, "\u05D4\u05EA\u05E0\u05EA\u05E7"))), /*#__PURE__*/React.createElement("div", {
-    className: "flex-1 flex flex-col"
+    className: "flex-1 flex flex-col min-h-0 overflow-hidden"
   }, isGuest && /*#__PURE__*/React.createElement("div", {
     className: "bg-gradient-to-r from-yellow-600 to-orange-600 px-8 py-4 flex items-center justify-between"
   }, /*#__PURE__*/React.createElement("div", {
@@ -1749,7 +1766,9 @@ const BDSMChat = () => {
   }, /*#__PURE__*/React.createElement(PhoneOff, {
     className: "w-4 h-4"
   }), "\u05E1\u05D9\u05D9\u05DD"))), /*#__PURE__*/React.createElement("div", {
-    className: "flex-1 overflow-y-auto p-4 space-y-3"
+    className: "flex-1 overflow-y-auto p-4 space-y-3",
+    ref: messagesContainerRef,
+    onScroll: handleScroll
   }, /*#__PURE__*/React.createElement("a", {
     href: "https://talkingbdsm.net",
     target: "_blank",
