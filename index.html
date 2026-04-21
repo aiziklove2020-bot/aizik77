@@ -704,43 +704,9 @@ const BDSMChat = () => {
   const [loginNickname, setLoginNickname] = useState('');
   const [loginError, setLoginError] = useState('');
   const [loginChecking, setLoginChecking] = useState(false);
-  const hasSaved = (() => { try { return !!localStorage.getItem('bdsm_chat_user'); } catch(e) { return false; } })();
-  const [sessionRestoring, setSessionRestoring] = useState(hasSaved);
 
-  // On mount: restore session from localStorage
   useEffect(() => {
-    const done = () => setSessionRestoring(false);
-    let saved, parsed;
-    try {
-      saved = localStorage.getItem('bdsm_chat_user');
-      if (!saved) { done(); return; }
-      parsed = JSON.parse(saved);
-      if (!parsed || !parsed.username || !parsed.id) { localStorage.removeItem('bdsm_chat_user'); done(); return; }
-    } catch(e) { try { localStorage.removeItem('bdsm_chat_user'); } catch(e2) {} done(); return; }
-
-    let attempts = 0;
-    const tryRestore = async () => {
-      attempts++;
-      if (typeof window.fbClaimNickname !== 'function') {
-        if (attempts < 50) { setTimeout(tryRestore, 200); } else { done(); }
-        return;
-      }
-      try {
-        const banned = typeof window.fbCheckBanned === 'function' ? await window.fbCheckBanned(parsed.username) : false;
-        if (banned) { localStorage.removeItem('bdsm_chat_user'); done(); return; }
-        const result = await window.fbClaimNickname(parsed.username);
-        if (result.ok) {
-          const u = { id: result.userId, username: parsed.username, password: '', role: parsed.role || 'user', online: true, banned: false };
-          try { localStorage.setItem('bdsm_chat_user', JSON.stringify({ username: u.username, id: u.id, role: u.role })); } catch(e) {}
-          setCurrentUser(u);
-          setIsLoggedIn(true);
-        } else {
-          localStorage.removeItem('bdsm_chat_user');
-        }
-      } catch(e) { localStorage.removeItem('bdsm_chat_user'); }
-      done();
-    };
-    tryRestore();
+    try { localStorage.removeItem('bdsm_chat_user'); } catch(e) {}
   }, []);
 
   const doNicknameLogin = async () => {
@@ -788,8 +754,6 @@ const BDSMChat = () => {
           online: true,
           banned: false
         };
-        // Save session to localStorage so refresh restores the user
-        try { localStorage.setItem('bdsm_chat_user', JSON.stringify({ username: nick, id: result.userId, role: 'user' })); } catch(e) {}
         setCurrentUser(newUser);
         setIsLoggedIn(true);
         setLoginNickname('');
@@ -1340,11 +1304,6 @@ const BDSMChat = () => {
   };
 
   // Login/Register Screen
-  if (sessionRestoring) {
-    return /*#__PURE__*/React.createElement("div", {
-      className: "loader"
-    }, /*#__PURE__*/React.createElement("div", { className: "spinner" }), /*#__PURE__*/React.createElement("div", null, "\u05D8\u05D5\u05E2\u05DF \u05D0\u05EA \u05D4\u05E6'\u05D0\u05D8..."), /*#__PURE__*/React.createElement("div", { style:{fontSize:'13px',color:'#666'} }, "\u05DE\u05EA\u05D7\u05D1\u05E8 \u05DC-Firebase..."));
-  }
   if (!isLoggedIn) {
     return /*#__PURE__*/React.createElement("div", {
       className: "min-h-screen bg-black flex items-center justify-center p-4 relative overflow-hidden"
