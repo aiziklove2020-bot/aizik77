@@ -711,13 +711,37 @@ const BDSMChat = () => {
   const [loginNickname, setLoginNickname] = useState('');
   const [loginError, setLoginError] = useState('');
   const [loginChecking, setLoginChecking] = useState(false);
+  // Session restore from sessionStorage (survives refresh, cleared on tab close)
   useEffect(() => {
-    // Clear any previously stored session — we always require fresh nickname
-    // entry so that shared devices don't auto-login as the previous user.
     try {
-      localStorage.removeItem('bdsm_chat_user');
-    } catch (e) {}
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+      const saved = sessionStorage.getItem('bdsm_chat_user');
+      if (!saved) return;
+      const parsed = JSON.parse(saved);
+      if (!parsed || !parsed.username || !parsed.id) { sessionStorage.removeItem('bdsm_chat_user'); return; }
+      // Wait for Firebase
+      let attempts = 0;
+      const tryRestore = async () => {
+        attempts++;
+        if (typeof window.fbClaimNickname !== 'function') {
+          if (attempts < 50) setTimeout(tryRestore, 200);
+          else sessionStorage.removeItem('bdsm_chat_user');
+          return;
+        }
+        try {
+          const banned = typeof window.fbCheckBanned === 'function' ? await window.fbCheckBanned(parsed.username) : false;
+          if (banned) { sessionStorage.removeItem('bdsm_chat_user'); return; }
+          const result = await window.fbClaimNickname(parsed.username);
+          if (result.ok) {
+            setCurrentUser({ id: result.userId, username: parsed.username, password: '', role: parsed.role || 'user', online: true, banned: false });
+            setIsLoggedIn(true);
+            sessionStorage.setItem('bdsm_chat_user', JSON.stringify({ username: parsed.username, id: result.userId, role: parsed.role || 'user' }));
+          } else {
+            sessionStorage.removeItem('bdsm_chat_user');
+          }
+        } catch(e) { sessionStorage.removeItem('bdsm_chat_user'); }
+      };
+      tryRestore();
+    } catch(e) { try { sessionStorage.removeItem('bdsm_chat_user'); } catch(e2) {} }
   }, []);
   const doNicknameLogin = async () => {
     setLoginError('');
@@ -761,6 +785,7 @@ const BDSMChat = () => {
           online: true,
           banned: false
         };
+        try { sessionStorage.setItem('bdsm_chat_user', JSON.stringify({ username: nick, id: result.userId, role: 'user' })); } catch(e) {}
         setCurrentUser(newUser);
         setIsLoggedIn(true);
         setLoginNickname('');
@@ -1105,9 +1130,8 @@ const BDSMChat = () => {
     if (currentUser && typeof window.fbReleaseNickname === 'function') {
       window.fbReleaseNickname(currentUser.username, currentUser.id).catch(() => {});
     }
-    try {
-      localStorage.removeItem('bdsm_chat_user');
-    } catch (e) {}
+    try { sessionStorage.removeItem('bdsm_chat_user'); } catch(e) {}
+    try { localStorage.removeItem('bdsm_chat_user'); } catch(e) {}
     setCurrentUser(null);
     setIsLoggedIn(false);
     setCurrentView('chat');
@@ -1730,7 +1754,7 @@ const BDSMChat = () => {
     }, msg.type === 'system' ? /*#__PURE__*/React.createElement("div", {
       className: "text-center text-red-400 text-sm py-2"
     }, msg.text) : /*#__PURE__*/React.createElement("div", {
-      className: `flex ${msg.userId === currentUser.id ? 'justify-start' : 'justify-end'} group`
+      className: `flex ${msg.userId === currentUser.id ? 'justify-end' : 'justify-start'} group`
     }, /*#__PURE__*/React.createElement("div", {
       className: "flex items-start gap-2 md:gap-3 max-w-[85%] md:max-w-xl relative"
     }, msg.userId !== currentUser.id && /*#__PURE__*/React.createElement("div", {
@@ -2021,7 +2045,7 @@ const BDSMChat = () => {
     }
     return msgs.map(msg => /*#__PURE__*/React.createElement("div", {
       key: msg._firestoreId || msg.from + msg.timestamp,
-      className: `flex ${msg.from === currentUser.username ? 'justify-start' : 'justify-end'}`
+      className: `flex ${msg.from === currentUser.username ? 'justify-end' : 'justify-start'}`
     }, /*#__PURE__*/React.createElement("div", {
       className: `px-4 md:px-5 py-2 md:py-3 rounded-2xl max-w-[85%] md:max-w-xl ${msg.from === currentUser.username ? 'bg-red-600' : 'bg-black/60 border border-red-600/20'}`
     }, /*#__PURE__*/React.createElement("div", {
