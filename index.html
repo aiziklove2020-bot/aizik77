@@ -19,8 +19,6 @@
 
   <style>
     * { font-family: 'Assistant', sans-serif; }
-    img { -webkit-user-drag: none; user-drag: none; -webkit-touch-callout: none; }
-    img::selection { background: transparent; }
     body { margin: 0; background: #000; color: #fff; -webkit-font-smoothing: antialiased; overscroll-behavior: none; }
     #root { min-height: 100vh; min-height: 100dvh; }
     /* Make h-screen work correctly on mobile (accounts for address bar) */
@@ -63,7 +61,7 @@
     #debug-toggle.visible { display: block; }
   </style>
 </head>
-<body oncontextmenu="if(event.target.tagName==='IMG'){event.preventDefault();return false;}">
+<body>
   <div id="root">
     <div class="loader">
       <div class="spinner"></div>
@@ -201,32 +199,22 @@
         }
       };
 
-      // Reclaim an existing nickname using the same userId (used on page refresh)
       window.fbReclaimNickname = async (nickname, userId) => {
         const key = nickKey(nickname);
-        if (!key) return { ok: false };
+        if (!key) return {ok:false};
         try {
-          const nickRef = doc(db, 'chatNicknames', key);
+          const nickRef = doc(db,'chatNicknames',key);
           const snap = await getDoc(nickRef);
           if (snap.exists()) {
             const data = snap.data();
-            // If the userId matches — it's the same user, allow reclaim
-            if (data.userId === userId) {
-              await setDoc(nickRef, { nickname: nickname.trim(), userId: userId, lastSeenAt: serverTimestamp() }, { merge: true });
-              return { ok: true, userId: userId };
-            }
-            // Different userId but stale — allow reclaim
-            const lastAt = data.lastSeenAt && data.lastSeenAt.seconds ? data.lastSeenAt.seconds * 1000 : 0;
-            if (Date.now() - lastAt > 60 * 1000) {
-              await setDoc(nickRef, { nickname: nickname.trim(), userId: userId, lastSeenAt: serverTimestamp() }, { merge: true });
-              return { ok: true, userId: userId };
-            }
-            return { ok: false, reason: 'taken' };
+            if (data.userId===userId) { await setDoc(nickRef,{nickname:nickname.trim(),userId,lastSeenAt:serverTimestamp()},{merge:true}); return {ok:true,userId}; }
+            const lastAt = data.lastSeenAt?.seconds?data.lastSeenAt.seconds*1000:0;
+            if (Date.now()-lastAt>60000) { await setDoc(nickRef,{nickname:nickname.trim(),userId,lastSeenAt:serverTimestamp()},{merge:true}); return {ok:true,userId}; }
+            return {ok:false,reason:'taken'};
           }
-          // Doesn't exist — claim fresh
-          await setDoc(nickRef, { nickname: nickname.trim(), userId: userId, lastSeenAt: serverTimestamp() });
-          return { ok: true, userId: userId };
-        } catch(e) { return { ok: false, reason: e.message }; }
+          await setDoc(nickRef,{nickname:nickname.trim(),userId,lastSeenAt:serverTimestamp()});
+          return {ok:true,userId};
+        } catch(e) { return {ok:false,reason:e.message}; }
       };
 
       // Admin-only: claim a reserved admin nickname (bypasses the reserved check)
@@ -296,7 +284,7 @@
       window.fbSubscribeOnline = (callback) => {
         const q = query(collection(db, 'chatNicknames'));
         return onSnapshot(q, (snapshot) => {
-          const cutoff = Date.now() - 45 * 1000; // 45 sec stale window
+          const cutoff = Date.now() - 45 * 1000;
           const users = snapshot.docs
             .map(d => Object.assign({}, d.data(), { _id: d.id }))
             .filter(u => u.lastSeenAt && u.lastSeenAt.seconds && (u.lastSeenAt.seconds * 1000) > cutoff);
@@ -307,22 +295,6 @@
       };
 
       // Subscribe to pinned message (admin can pin one message for everyone)
-      // Subscribe to rooms from Firebase (admin can add/remove)
-      window.fbSubscribeRooms = (callback) => {
-        return onSnapshot(collection(db, 'chatRooms'), (snap) => {
-          const rooms = snap.docs.map(d => Object.assign({}, d.data(), { _id: d.id }));
-          rooms.sort((a,b) => (a.order||99)-(b.order||99));
-          callback(rooms);
-        }, () => callback([]));
-      };
-
-      // Subscribe to party announcement
-      window.fbSubscribeParty = (callback) => {
-        return onSnapshot(doc(db, 'chatSettings', 'party'), (snap) => {
-          callback(snap.exists() ? snap.data() : null);
-        }, () => callback(null));
-      };
-
       window.fbSubscribePinned = (callback) => {
         return onSnapshot(doc(db, 'chatPinned', 'current'), (snap) => {
           callback(snap.exists() ? snap.data() : null);
@@ -554,17 +526,34 @@ const BDSMChat = () => {
   }]);
 
   // Chat State
-  const [currentView, setCurrentView] = useState('chat');
+  const [currentView, setCurrentView] = useState('chat'); // 'chat', 'admin', 'private'
   const [currentRoom, setCurrentRoom] = useState('כללי');
-  const DEFAULT_ROOMS = [
-    { id:1, name:'כללי',   icon:'💬', description:'שיחות כלליות' },
-    { id:2, name:'מסיבות', icon:'🎉', description:'ארגון מסיבות' },
-    { id:3, name:'שיבארי', icon:'🪢', description:'אומנות הקשירה' },
-    { id:4, name:'סשנים',  icon:'⛓️', description:'סשנים וחוויות' },
-    { id:5, name:'פמדום',  icon:'👑', description:'נשים שולטות' },
-  ];
-  const [rooms, setRooms] = useState(DEFAULT_ROOMS);
-  const [firebaseRooms, setFirebaseRooms] = useState([]);
+  const [rooms, setRooms] = useState([{
+    id: 1,
+    name: 'כללי',
+    icon: '💬',
+    description: 'שיחות כלליות'
+  }, {
+    id: 2,
+    name: 'מסיבות',
+    icon: '🎉',
+    description: 'ארגון מסיבות'
+  }, {
+    id: 3,
+    name: 'שיבארי',
+    icon: '🪢',
+    description: 'אומנות הקשירה'
+  }, {
+    id: 4,
+    name: 'סשנים',
+    icon: '⛓️',
+    description: 'סשנים וחוויות'
+  }, {
+    id: 5,
+    name: 'פמדום',
+    icon: '👑',
+    description: 'נשים שולטות'
+  }]);
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -651,19 +640,15 @@ const BDSMChat = () => {
 
   // Show/Hide Users Sidebar
   const [showUsersSidebar, setShowUsersSidebar] = useState(false);
-  // Always keep window globals updated for use inside Firebase callbacks
-  window.__chatCurrentView = currentView;
-  window.__chatActivePm = activePrivateChat;
-
-  // Emoji picker & image upload
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showPrivateEmojiPicker, setShowPrivateEmojiPicker] = useState(false);
   const fileInputRef = useRef(null);
   const privateFileInputRef = useRef(null);
-  const EMOJIS = ['😀','😂','😍','🥰','😎','😭','😅','🤔','😏','🥺','😈','❤️','🔥','👍','👎','💪','🙏','🎉','✨','💋','⛓️','🪢','🎭','👑','🌹','🔞','💦','🍑','😈','🖤','💀','🤫','😮','🫦','🥵','😤','💯','🎯','⚡','🕷️'];
+  const EMOJIS = ['😀','😂','😍','🥰','😎','😭','😅','🤔','😏','🥺','😈','❤️','🔥','👍','👎','💪','🙏','🎉','✨','💋','⛓️','🪲','🎭','👑','🌹','🔞','💦','🍑','😈','🖤','💀','🤫','😮','🫖','🥵','😤','💯','🎯','⚡','🕷️'];
 
   // Party Announcements
-  // Party announcement controlled by admin via Firebase
+  const [showPartyAnnouncement, setShowPartyAnnouncement] = useState(false);
+  const [partyAnnouncementText, setPartyAnnouncementText] = useState('');
 
   // Admin Reports & Logs
   const [reports, setReports] = useState([]);
@@ -706,84 +691,69 @@ const BDSMChat = () => {
     }
   };
 
-  // Party announcement now comes from Firebase (set by admin)
-  const showPartyAnnouncement = !!(liveParty && liveParty.active && (liveParty.text || liveParty.date));
-  const partyAnnouncementText = liveParty ? (liveParty.text || '') : '';
-  const partyDate = liveParty ? (liveParty.date || '') : '';
+  // Check if it's party day (Thursday or Friday)
+  useEffect(() => {
+    const checkPartyDay = () => {
+      const today = new Date().getDay(); // 0 = Sunday, 4 = Thursday, 5 = Friday
+
+      if (today === 4) {
+        // Thursday
+        setShowPartyAnnouncement(true);
+        setPartyAnnouncementText('🎉 מסיבת קהילה הערב! הצטרפו אלינו למסיבה הכי שווה של השבוע!');
+      } else if (today === 5) {
+        // Friday
+        setShowPartyAnnouncement(true);
+        setPartyAnnouncementText('🔥 ערב שישי של אש! מסיבה מיוחדת הערב - אל תפספסו!');
+      } else {
+        setShowPartyAnnouncement(false);
+      }
+    };
+    checkPartyDay();
+    // Check again every hour in case day changes
+    const interval = setInterval(checkPartyDay, 3600000);
+    return () => clearInterval(interval);
+  }, []);
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const localStreamRef = useRef(null);
   const messagesEndRef = useRef(null);
-  const messagesContainerRef = useRef(null);
-  const [showScrollBtn, setShowScrollBtn] = useState(false);
-  const isNearBottomRef = useRef(true);
-
   useEffect(() => {
-    const el = messagesContainerRef.current;
-    if (!el) { messagesEndRef.current?.scrollIntoView({behavior:'smooth'}); return; }
-    if (isNearBottomRef.current) {
-      el.scrollTop = el.scrollHeight;
-    } else {
-      setShowScrollBtn(true);
-    }
+    messagesEndRef.current?.scrollIntoView({
+      behavior: 'smooth'
+    });
   }, [messages]);
-
-  const handleScroll = (e) => {
-    const el = e.target;
-    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    isNearBottomRef.current = distFromBottom < 100;
-    setShowScrollBtn(distFromBottom > 150);
-  };
-
-  const scrollToBottom = () => {
-    const el = messagesContainerRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-    setShowScrollBtn(false);
-    isNearBottomRef.current = true;
-  };
 
   // Nickname-based login. User must type a nickname. Check for bans & uniqueness.
   // Stored in localStorage so refresh doesn't kick them out.
   const [loginNickname, setLoginNickname] = useState('');
   const [loginError, setLoginError] = useState('');
   const [loginChecking, setLoginChecking] = useState(false);
-  // Session restore from sessionStorage (survives refresh, cleared on tab close)
   useEffect(() => {
     try {
-      const saved = sessionStorage.getItem('bdsm_chat_user');
+      var saved = sessionStorage.getItem('bdsm_chat_user');
       if (!saved) return;
-      const parsed = JSON.parse(saved);
-      if (!parsed || !parsed.username || !parsed.id) { sessionStorage.removeItem('bdsm_chat_user'); return; }
-      // Wait for Firebase
-      let attempts = 0;
-      const tryRestore = async () => {
+      var parsed = JSON.parse(saved);
+      if (!parsed||!parsed.username||!parsed.id) { sessionStorage.removeItem('bdsm_chat_user'); return; }
+      var attempts = 0;
+      var tryRestore = async function() {
         attempts++;
-        if (typeof window.fbClaimNickname !== 'function') {
-          if (attempts < 50) setTimeout(tryRestore, 200);
-          else sessionStorage.removeItem('bdsm_chat_user');
-          return;
-        }
+        var fn = window.fbReclaimNickname || window.fbClaimNickname;
+        if (!fn) { if (attempts<50) setTimeout(tryRestore,200); else sessionStorage.removeItem('bdsm_chat_user'); return; }
         try {
-          const banned = typeof window.fbCheckBanned === 'function' ? await window.fbCheckBanned(parsed.username) : false;
+          var banned = window.fbCheckBanned ? await window.fbCheckBanned(parsed.username) : false;
           if (banned) { sessionStorage.removeItem('bdsm_chat_user'); return; }
-          const reclaimFn = typeof window.fbReclaimNickname === 'function' ? window.fbReclaimNickname : window.fbClaimNickname;
-          const result = await reclaimFn(parsed.username, parsed.id);
+          var result = await fn(parsed.username, parsed.id);
           if (result.ok) {
-            const uid = result.userId || parsed.id;
-            // Immediately send heartbeat so user appears online right away
-            if (typeof window.fbHeartbeat === 'function') {
-              window.fbHeartbeat(parsed.username, uid);
-            }
-            setCurrentUser({ id: uid, username: parsed.username, password: '', role: parsed.role || 'user', online: true, banned: false });
+            var uid = result.userId || parsed.id;
+            if (window.fbHeartbeat) window.fbHeartbeat(parsed.username, uid);
+            setCurrentUser({id:uid,username:parsed.username,password:'',role:parsed.role||'user',online:true,banned:false});
             setIsLoggedIn(true);
-            sessionStorage.setItem('bdsm_chat_user', JSON.stringify({ username: parsed.username, id: uid, role: parsed.role || 'user' }));
-          } else {
-            sessionStorage.removeItem('bdsm_chat_user');
-          }
+            sessionStorage.setItem('bdsm_chat_user',JSON.stringify({username:parsed.username,id:uid,role:parsed.role||'user'}));
+          } else sessionStorage.removeItem('bdsm_chat_user');
         } catch(e) { sessionStorage.removeItem('bdsm_chat_user'); }
       };
       tryRestore();
-    } catch(e) { try { sessionStorage.removeItem('bdsm_chat_user'); } catch(e2) {} }
+    } catch(e) { try{sessionStorage.removeItem('bdsm_chat_user');}catch(e2){} }
   }, []);
   const doNicknameLogin = async () => {
     setLoginError('');
@@ -827,7 +797,7 @@ const BDSMChat = () => {
           online: true,
           banned: false
         };
-        try { sessionStorage.setItem('bdsm_chat_user', JSON.stringify({ username: nick, id: result.userId, role: 'user' })); } catch(e) {}
+        try{sessionStorage.setItem('bdsm_chat_user',JSON.stringify({username:nick,id:result.userId,role:'user'}));}catch(e){}
         setCurrentUser(newUser);
         setIsLoggedIn(true);
         setLoginNickname('');
@@ -951,55 +921,12 @@ const BDSMChat = () => {
     doHeartbeat();
     const interval = setInterval(doHeartbeat, 20 * 1000);
 
-    // On tab close: try to release. On refresh: session restore will re-claim immediately.
-    const handlePageHide = (e) => {
-      if (typeof window.fbReleaseNickname === 'function' && currentUser) {
-        try { window.fbReleaseNickname(currentUser.username, currentUser.id); } catch(err) {}
-      }
+    var handlePageHide = function() {
+      if (typeof window.fbReleaseNickname==='function'&&currentUser) try{window.fbReleaseNickname(currentUser.username,currentUser.id);}catch(e){}
     };
     window.addEventListener('pagehide', handlePageHide);
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener('pagehide', handlePageHide);
-    };
+    return () => { clearInterval(interval); window.removeEventListener('pagehide',handlePageHide); };
   }, [isLoggedIn, currentUser]);
-
-  // LIVE: subscribe to Firebase rooms (admin can add/remove)
-  useEffect(() => {
-    if (!isLoggedIn) return;
-    let unsub = null, cancelled = false;
-    const tryStart = () => {
-      if (cancelled) return;
-      if (typeof window.fbSubscribeRooms === 'function') {
-        unsub = window.fbSubscribeRooms(fbRooms => {
-          if (!cancelled) {
-            if (fbRooms && fbRooms.length > 0) {
-              setRooms(fbRooms.map((r,i) => ({id:r._id||i, name:r.name, icon:r.icon||'💬', description:r.description||''})));
-            } else {
-              setRooms(DEFAULT_ROOMS);
-            }
-          }
-        });
-      } else setTimeout(tryStart, 300);
-    };
-    tryStart();
-    return () => { cancelled = true; if (typeof unsub === 'function') unsub(); };
-  }, [isLoggedIn]);
-
-  // LIVE: party announcement from Firebase
-  const [liveParty, setLiveParty] = useState(null);
-  useEffect(() => {
-    if (!isLoggedIn) return;
-    let unsub = null, cancelled = false;
-    const tryStart = () => {
-      if (cancelled) return;
-      if (typeof window.fbSubscribeParty === 'function') {
-        unsub = window.fbSubscribeParty(p => { if (!cancelled) setLiveParty(p); });
-      } else setTimeout(tryStart, 300);
-    };
-    tryStart();
-    return () => { cancelled = true; if (typeof unsub === 'function') unsub(); };
-  }, [isLoggedIn]);
 
   // LIVE: subscribe to list of online users (chatNicknames collection)
   const [liveOnlineUsers, setLiveOnlineUsers] = useState([]);
@@ -1050,16 +977,18 @@ const BDSMChat = () => {
     };
   }, [isLoggedIn]);
 
-  // LIVE: subscribe to private messages for current user
+  // LIVE: subscribe to private messages + notifications
   const [livePrivateMessages, setLivePrivateMessages] = useState([]);
   const [pmUnread, setPmUnread] = useState({});
   const [pmToast, setPmToast] = useState(null);
   const prevPmRef = useRef([]);
 
+  window.__cv = currentView;
+  window.__apm = activePrivateChat;
+
   useEffect(() => {
     if (!isLoggedIn || !currentUser) return;
-    let unsubscribe = null;
-    let cancelled = false;
+    let unsubscribe = null; let cancelled = false;
     const tryStart = () => {
       if (cancelled) return;
       if (typeof window.fbSubscribePrivate === 'function') {
@@ -1071,57 +1000,27 @@ const BDSMChat = () => {
             if (newIn.length > 0) {
               setPmUnread(function(prev) {
                 var u = Object.assign({}, prev);
-                newIn.forEach(function(m){
-                  // don't count unread if currently in that chat
-                  if (!(window.__chatCurrentView === 'private' && window.__chatActivePm === m.from)) {
-                    u[m.from] = (u[m.from] || 0) + 1;
-                  }
-                });
+                newIn.forEach(function(m){ if (!(window.__cv==='private'&&window.__apm===m.from)) u[m.from]=(u[m.from]||0)+1; });
                 return u;
               });
-              var latest = newIn[newIn.length - 1];
-              // only show toast if NOT currently in that private chat
-              if (!(window.__chatCurrentView === 'private' && window.__chatActivePm === latest.from)) {
-                setPmToast({ from: latest.from, text: latest.text, id: latest._firestoreId });
+              var latest = newIn[newIn.length-1];
+              if (!(window.__cv==='private'&&window.__apm===latest.from)) {
+                setPmToast({from:latest.from,text:latest.text,id:latest._firestoreId});
+                try { var ctx=new(window.AudioContext||window.webkitAudioContext)();var osc=ctx.createOscillator();var gain=ctx.createGain();osc.connect(gain);gain.connect(ctx.destination);osc.frequency.setValueAtTime(880,ctx.currentTime);osc.frequency.setValueAtTime(660,ctx.currentTime+0.1);gain.gain.setValueAtTime(0.15,ctx.currentTime);gain.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.3);osc.start(ctx.currentTime);osc.stop(ctx.currentTime+0.3); } catch(e) {}
               }
-              try {
-                var ctx = new (window.AudioContext || window.webkitAudioContext)();
-                var osc = ctx.createOscillator(); var gain = ctx.createGain();
-                osc.connect(gain); gain.connect(ctx.destination);
-                osc.frequency.setValueAtTime(880, ctx.currentTime);
-                osc.frequency.setValueAtTime(660, ctx.currentTime + 0.1);
-                gain.gain.setValueAtTime(0.15, ctx.currentTime);
-                gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
-                osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.3);
-              } catch(e) {}
             }
             prevPmRef.current = msgs;
           }
         });
-      } else {
-        setTimeout(tryStart, 200);
-      }
+      } else setTimeout(tryStart, 200);
     };
     tryStart();
-    return () => {
-      cancelled = true;
-      if (typeof unsubscribe === 'function') unsubscribe();
-    };
+    return () => { cancelled=true; if (typeof unsubscribe==='function') unsubscribe(); };
   }, [isLoggedIn, currentUser]);
 
-  useEffect(() => {
-    if (!pmToast) return;
-    var t = setTimeout(function(){ setPmToast(null); }, 5000);
-    return function(){ clearTimeout(t); };
-  }, [pmToast && pmToast.id]);
-
-  useEffect(() => {
-    if (currentView === 'private' && activePrivateChat) {
-      setPmUnread(function(prev){ var u = Object.assign({}, prev); delete u[activePrivateChat]; return u; });
-    }
-  }, [currentView, activePrivateChat]);
-
-  var totalUnread = Object.values(pmUnread).reduce(function(a,b){ return a+b; }, 0);
+  useEffect(() => { if (!pmToast) return; var t=setTimeout(function(){setPmToast(null);},5000); return function(){clearTimeout(t);}; }, [pmToast&&pmToast.id]);
+  useEffect(() => { if (currentView==='private'&&activePrivateChat) setPmUnread(function(prev){var u=Object.assign({},prev);delete u[activePrivateChat];return u;}); }, [currentView,activePrivateChat]);
+  var totalUnread = Object.values(pmUnread).reduce(function(a,b){return a+b;},0);
 
   // Authentication Functions
   const handleLogin = (username, password) => {
@@ -1211,8 +1110,8 @@ const BDSMChat = () => {
     if (currentUser && typeof window.fbReleaseNickname === 'function') {
       window.fbReleaseNickname(currentUser.username, currentUser.id).catch(() => {});
     }
-    try { sessionStorage.removeItem('bdsm_chat_user'); } catch(e) {}
-    try { localStorage.removeItem('bdsm_chat_user'); } catch(e) {}
+    try{sessionStorage.removeItem('bdsm_chat_user');}catch(e){}
+    try{localStorage.removeItem('bdsm_chat_user');}catch(e){}
     setCurrentUser(null);
     setIsLoggedIn(false);
     setCurrentView('chat');
@@ -1283,17 +1182,16 @@ const BDSMChat = () => {
   };
   const handleImageUpload = async (file, isPrivate) => {
     if (!file) return;
-    if (file.size > 5 * 1024 * 1024) { alert('התמונה גדולה מדי - מקסימום 5MB'); return; }
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      const base64 = e.target.result;
-      const isAdmin = currentUser.role === 'admin';
-      if (isPrivate && activePrivateChat) {
-        try {
-          await window.fbSendPrivate({ from: currentUser.username, to: activePrivateChat, text: '', imageUrl: base64, timestamp: new Date().toLocaleTimeString('he-IL') });
-        } catch(err) { alert('שגיאה בשליחת התמונה'); }
+    if (file.size>5*1024*1024) { alert('התמונה גדולה מדי - מקסימום 5MB'); return; }
+    var reader = new FileReader();
+    reader.onload = async function(ev) {
+      var base64 = ev.target.result;
+      var isAdmin = currentUser.role==='admin';
+      if (isPrivate&&activePrivateChat) {
+        try { await window.fbSendPrivate({from:currentUser.username,to:activePrivateChat,text:'',imageUrl:base64,timestamp:new Date().toLocaleTimeString('he-IL')}); }
+        catch(err) { alert('שגיאה בשליחת התמונה'); }
       } else {
-        const msg = { type: 'user', user: getDisplayName(), userId: currentUser.id, realUser: currentUser.username, isMasked: maskMode, isAdmin, text: '', imageUrl: base64, room: currentRoom, timestamp: new Date().toLocaleTimeString('he-IL') };
+        var msg = {type:'user',user:getDisplayName(),userId:currentUser.id,realUser:currentUser.username,isMasked:maskMode,isAdmin,text:'',imageUrl:base64,room:currentRoom,timestamp:new Date().toLocaleTimeString('he-IL')};
         try { await window.fbSendMessage(msg); } catch(err) { alert('שגיאה בשליחת התמונה'); }
       }
     };
@@ -1533,22 +1431,8 @@ const BDSMChat = () => {
         }
       `), /*#__PURE__*/React.createElement("div", {
     className: "flex h-screen relative z-10"
-  },
-  pmToast && /*#__PURE__*/React.createElement("div", {
-    key: pmToast.id,
-    onClick: () => { setActivePrivateChat(pmToast.from); setCurrentView('private'); setPmToast(null); },
-    style: {position:'fixed',top:'20px',left:'50%',transform:'translateX(-50%)',zIndex:99999,minWidth:'280px',maxWidth:'340px',width:'calc(100vw - 32px)',background:'#1a0000',border:'2px solid #cc0000',borderRadius:'14px',padding:'16px',boxShadow:'0 8px 40px rgba(204,0,0,0.5)',cursor:'pointer',textAlign:'center',fontFamily:'Assistant,sans-serif',position:'fixed'}
-  },
-    React.createElement("div", {style:{fontSize:'11px',color:'#cc0000',fontWeight:'700',marginBottom:'10px'}}, "הודעה פרטית חדשה"),
-    React.createElement("div", {style:{width:'48px',height:'48px',borderRadius:'50%',background:'linear-gradient(135deg,#cc0000,#8b0000)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'22px',margin:'0 auto 10px'}}, "\uD83D\uDC64"),
-    React.createElement("div", {style:{fontSize:'20px',color:'#ffffff',fontWeight:'900',marginBottom:'6px'}}, pmToast.from),
-    React.createElement("div", {style:{fontSize:'13px',color:'#cccccc',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',marginBottom:'12px',direction:'rtl'}}, pmToast.text),
-    React.createElement("div", {style:{fontSize:'12px',color:'#cc0000',opacity:0.9}}, "לחץ לפתיחת השיחה"),
-    React.createElement("button", {
-      onClick: (e)=>{e.stopPropagation();setPmToast(null);},
-      style:{position:'absolute',top:'8px',left:'10px',background:'none',border:'none',color:'#666',cursor:'pointer',fontSize:'20px',lineHeight:1,padding:'4px'}
-    }, "X")
-  ),
+  }, ,
+  pmToast && React.createElement("div", {key:pmToast.id,onClick:()=>{setActivePrivateChat(pmToast.from);setCurrentView('private');setPmToast(null);},style:{position:'fixed',top:'20px',left:'50%',transform:'translateX(-50%)',zIndex:99999,minWidth:'280px',maxWidth:'340px',width:'calc(100vw - 32px)',background:'#1a0000',border:'2px solid #cc0000',borderRadius:'14px',padding:'16px',boxShadow:'0 8px 40px rgba(204,0,0,0.5)',cursor:'pointer',textAlign:'center',fontFamily:'Assistant,sans-serif'}},React.createElement("div",{style:{fontSize:"11px",color:"#cc0000",fontWeight:"700",marginBottom:"8px"}},"הודעה פרטית חדשה"),React.createElement("div",{style:{width:"42px",height:"42px",borderRadius:"50%",background:"linear-gradient(135deg,#cc0000,#8b0000)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"20px",margin:"0 auto 8px"}},"👤"),React.createElement("div",{style:{fontSize:"18px",color:"#fff",fontWeight:"900",marginBottom:"4px"}},pmToast.from),React.createElement("div",{style:{fontSize:"13px",color:"#ccc",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginBottom:"8px"}},pmToast.text),React.createElement("div",{style:{fontSize:"11px",color:"#cc0000",opacity:0.9}},"לחץ לפתיחת השיחה"),React.createElement("button",{onClick:(ev)=>{ev.stopPropagation();setPmToast(null);},style:{position:"absolute",top:"8px",left:"10px",background:"none",border:"none",color:"#666",cursor:"pointer",fontSize:"20px",lineHeight:1}},"X")),
   showRoomsSidebar && /*#__PURE__*/React.createElement("div", {
     onClick: () => setShowRoomsSidebar(false),
     className: "md:hidden fixed inset-0 bg-black/60 z-40"
@@ -1619,7 +1503,7 @@ const BDSMChat = () => {
     onClick: () => toggleMaskMode(null),
     className: "w-full px-3 py-2 mt-3 bg-red-600/20 hover:bg-red-600 border border-red-500/30 rounded-lg text-sm font-medium transition-all"
   }, "\u05D1\u05D8\u05DC \u05DE\u05E6\u05D1 \u05D0\u05E0\u05D5\u05E0\u05D9\u05DE\u05D9"))), /*#__PURE__*/React.createElement("div", {
-    className: "space-y-2 mb-4"
+    className: "flex-1 overflow-y-auto space-y-3 mb-6"
   }, rooms.map(room => /*#__PURE__*/React.createElement("button", {
     key: room.id,
     onClick: () => {
@@ -1638,11 +1522,11 @@ const BDSMChat = () => {
     className: "text-xs text-gray-500"
   }, room.description))))), /*#__PURE__*/React.createElement("button", {
     onClick: handleLogout,
-    className: "w-full px-4 py-3 mt-3 flex-shrink-0 bg-black/50 hover:bg-red-900/50 border border-red-600/30 rounded-xl flex items-center justify-center gap-2 transition-all"
+    className: "w-full px-4 py-3 bg-black/50 hover:bg-red-900/50 border border-red-600/30 rounded-xl flex items-center justify-center gap-2 transition-all"
   }, /*#__PURE__*/React.createElement(LogOut, {
     className: "w-5 h-5"
   }), /*#__PURE__*/React.createElement("span", null, "\u05D4\u05EA\u05E0\u05EA\u05E7"))), /*#__PURE__*/React.createElement("div", {
-    className: "flex-1 flex flex-col min-h-0 overflow-hidden"
+    className: "flex-1 flex flex-col"
   }, isGuest && /*#__PURE__*/React.createElement("div", {
     className: "bg-gradient-to-r from-yellow-600 to-orange-600 px-8 py-4 flex items-center justify-between"
   }, /*#__PURE__*/React.createElement("div", {
@@ -1754,10 +1638,7 @@ const BDSMChat = () => {
     className: "hidden md:inline font-medium"
   }, "\u05DE\u05E9\u05EA\u05DE\u05E9\u05D9\u05DD \u05DE\u05D7\u05D5\u05D1\u05E8\u05D9\u05DD"), !showUsersSidebar && onlineUsers.length > 0 && /*#__PURE__*/React.createElement("span", {
     className: "bg-red-600 text-white text-xs font-bold rounded-full px-2 py-0.5"
-  }, onlineUsers.length),
-  totalUnread > 0 && /*#__PURE__*/React.createElement("span", {
-    style: {position:'absolute',top:'-7px',right:'-7px',background:'#cc0000',color:'#fff',fontSize:'11px',fontWeight:'900',borderRadius:'50%',minWidth:'20px',height:'20px',display:'flex',alignItems:'center',justifyContent:'center',border:'2px solid #000',padding:'0 3px'}
-  }, totalUnread > 9 ? '9+' : totalUnread)))), isInCall && /*#__PURE__*/React.createElement("div", {
+  }, onlineUsers.length), totalUnread > 0 && React.createElement("span",{style:{position:"absolute",top:"-7px",right:"-7px",background:"#cc0000",color:"#fff",fontSize:"11px",fontWeight:"900",borderRadius:"50%",minWidth:"20px",height:"20px",display:"flex",alignItems:"center",justifyContent:"center",border:"2px solid #000",padding:"0 3px"}},totalUnread>9?"9+":totalUnread)))), isInCall && /*#__PURE__*/React.createElement("div", {
     className: "glass-panel p-4 border-b border-white/5"
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex gap-4 justify-center"
@@ -1786,9 +1667,7 @@ const BDSMChat = () => {
   }, /*#__PURE__*/React.createElement(PhoneOff, {
     className: "w-4 h-4"
   }), "\u05E1\u05D9\u05D9\u05DD"))), /*#__PURE__*/React.createElement("div", {
-    className: "flex-1 overflow-y-auto p-4 space-y-3",
-    ref: messagesContainerRef,
-    onScroll: handleScroll
+    className: "flex-1 overflow-y-auto p-4 space-y-3"
   }, /*#__PURE__*/React.createElement("a", {
     href: "https://talkingbdsm.net",
     target: "_blank",
@@ -1854,7 +1733,7 @@ const BDSMChat = () => {
       className: "text-xs bg-purple-600/30 px-2 py-0.5 rounded"
     }, "\u05DE\u05D5\u05E1\u05EA\u05E8")), /*#__PURE__*/React.createElement("div", {
       className: "text-white break-words whitespace-pre-wrap text-sm md:text-base"
-    }, msg.imageUrl ? React.createElement("img", {src:msg.imageUrl,style:{maxWidth:"240px",maxHeight:"240px",borderRadius:"10px",cursor:"default",display:"block",marginTop:"4px",userSelect:"none",WebkitUserSelect:"none",pointerEvents:"none"},alt:"תמונה",draggable:false}) : msg.text), /*#__PURE__*/React.createElement("div", {
+    }, msg.imageUrl ? React.createElement("img",{src:msg.imageUrl,style:{maxWidth:"240px",maxHeight:"240px",borderRadius:"10px",display:"block",marginTop:"4px",pointerEvents:"none"},draggable:false,alt:"img"}) : msg.text), /*#__PURE__*/React.createElement("div", {
       className: "text-xs text-gray-300 mt-1 md:mt-2"
     }, msg.timestamp)), msg.userId === currentUser.id && /*#__PURE__*/React.createElement("div", {
       className: `w-8 h-8 md:w-10 md:h-10 flex-shrink-0 ${isAdminMessage ? 'bg-gradient-to-br from-yellow-500 to-amber-700 ring-2 ring-yellow-400' : msg.isMasked ? 'bg-gradient-to-br from-purple-600 to-purple-800' : 'bg-gradient-to-br from-red-600 to-red-800'} rounded-full flex items-center justify-center shadow-lg text-sm md:text-base`
@@ -1879,22 +1758,13 @@ const BDSMChat = () => {
     className: "px-5 py-3 rounded-2xl bg-red-700/80 animate-pulse"
   }, /*#__PURE__*/React.createElement("div", {
     className: "text-white"
-  }, "\u05DE\u05E7\u05DC\u05D9\u05D3...")))),
-  showScrollBtn && React.createElement("div", {
-    style:{position:"sticky",bottom:"16px",display:"flex",justifyContent:"center",zIndex:10,pointerEvents:"none"}
-  }, React.createElement("button", {
-    onClick: scrollToBottom,
-    style:{pointerEvents:"all",background:"#cc0000",color:"#fff",border:"none",borderRadius:"50%",width:"44px",height:"44px",fontSize:"22px",cursor:"pointer",boxShadow:"0 4px 20px rgba(204,0,0,0.6)",display:"flex",alignItems:"center",justifyContent:"center"}
-  }, "\u2193")),
-  /*#__PURE__*/React.createElement("div", {
+  }, "\u05DE\u05E7\u05DC\u05D9\u05D3...")))), /*#__PURE__*/React.createElement("div", {
     ref: messagesEndRef
   })), /*#__PURE__*/React.createElement("div", {
     className: "bg-black/70 backdrop-blur-md border-t border-red-600/30 px-3 md:px-8 py-3 md:py-5 pb-safe"
   },
-  showEmojiPicker && React.createElement("div", {
-    style:{display:"flex",flexWrap:"wrap",gap:"6px",padding:"10px",background:"#111",borderRadius:"12px",marginBottom:"8px",maxHeight:"150px",overflowY:"auto"}
-  }, EMOJIS.map(function(em){ return React.createElement("button",{key:em,onClick:function(){setNewMessage(function(p){return p+em;});setShowEmojiPicker(false);},style:{fontSize:"22px",background:"none",border:"none",cursor:"pointer",padding:"2px"}},em); })),
-  React.createElement("input",{type:"file",accept:"image/*",ref:fileInputRef,style:{display:"none"},onChange:function(e){handleImageUpload(e.target.files[0],false);e.target.value="";}}),
+  showEmojiPicker && React.createElement("div",{style:{display:"flex",flexWrap:"wrap",gap:"6px",padding:"10px",background:"#111",borderRadius:"12px",marginBottom:"8px",maxHeight:"150px",overflowY:"auto"}},EMOJIS.map(function(em){return React.createElement("button",{key:em,onClick:function(){setNewMessage(function(p){return p+em;});setShowEmojiPicker(false);},style:{fontSize:"22px",background:"none",border:"none",cursor:"pointer",padding:"2px"}},em);})),
+  React.createElement("input",{type:"file",accept:"image/*",ref:fileInputRef,style:{display:"none"},onChange:function(ev){handleImageUpload(ev.target.files[0],false);ev.target.value="";}}),
   /*#__PURE__*/React.createElement("div", {
     className: "flex gap-2 md:gap-3"
   }, /*#__PURE__*/React.createElement("button", {
@@ -1903,8 +1773,8 @@ const BDSMChat = () => {
     className: "px-4 md:px-6 py-3 md:py-4 bg-red-600 hover:bg-red-700 disabled:opacity-50 rounded-xl shadow-lg flex-shrink-0"
   }, /*#__PURE__*/React.createElement(Send, {
     className: "w-5 h-5"
-  })), React.createElement("button",{onClick:function(){setShowEmojiPicker(function(p){return !p;});},className:"px-3 py-3 bg-black/50 border border-red-600/30 rounded-xl hover:bg-black/70 flex-shrink-0",style:{fontSize:"20px"}},"\uD83D\uDE00"),
-  React.createElement("button",{onClick:function(){fileInputRef.current&&fileInputRef.current.click();},className:"px-3 py-3 bg-black/50 border border-red-600/30 rounded-xl hover:bg-black/70 flex-shrink-0",style:{fontSize:"20px"}},"\uD83D\uDCF7"),
+  })), React.createElement("button",{onClick:function(){setShowEmojiPicker(function(p){return !p;});},className:"px-3 py-3 bg-black/50 border border-red-600/30 rounded-xl hover:bg-black/70 flex-shrink-0",style:{fontSize:"20px"}},"😀"),
+  React.createElement("button",{onClick:function(){fileInputRef.current&&fileInputRef.current.click();},className:"px-3 py-3 bg-black/50 border border-red-600/30 rounded-xl hover:bg-black/70 flex-shrink-0",style:{fontSize:"20px"}},"📷"),
   /*#__PURE__*/React.createElement("input", {
     type: "text",
     placeholder: "\u05D4\u05E7\u05DC\u05D3 \u05D4\u05D5\u05D3\u05E2\u05D4...",
@@ -2137,25 +2007,17 @@ const BDSMChat = () => {
       key: msg._firestoreId || msg.from + msg.timestamp,
       className: `flex justify-start`
     }, /*#__PURE__*/React.createElement("div", {
-      className: `${msg.imageUrl ? '' : 'px-4 md:px-5 py-2 md:py-3'} rounded-2xl max-w-[85%] md:max-w-xl ${msg.from === currentUser.username ? (msg.imageUrl ? '' : 'bg-red-600') : (msg.imageUrl ? '' : 'bg-black/60 border border-red-600/20')}`
-    }, msg.imageUrl ? React.createElement("div", {style:{textAlign: msg.from === currentUser.username ? "right" : "left"}},
-        React.createElement("img", {src:msg.imageUrl,style:{maxWidth:"220px",maxHeight:"220px",borderRadius:"12px",cursor:"default",display:"inline-block",border: msg.from === currentUser.username ? "2px solid #cc0000" : "2px solid #333",userSelect:"none",WebkitUserSelect:"none",pointerEvents:"none"},alt:"תמונה",draggable:false}),
-        React.createElement("div", {style:{fontSize:"11px",color:"#999",marginTop:"4px"}}, msg.timestamp)
-      ) : /*#__PURE__*/React.createElement("div", null,
-        /*#__PURE__*/React.createElement("div", {
-          className: "text-white whitespace-pre-wrap break-words text-sm md:text-base"
-        }, msg.text),
-        /*#__PURE__*/React.createElement("div", {
-          className: "text-xs text-gray-300 mt-1 md:mt-2"
-        }, msg.timestamp)
-      ))));
+      className: `px-4 md:px-5 py-2 md:py-3 rounded-2xl max-w-[85%] md:max-w-xl ${msg.from === currentUser.username ? 'bg-red-600' : 'bg-black/60 border border-red-600/20'}`
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "text-white whitespace-pre-wrap break-words text-sm md:text-base"
+    }, msg.imageUrl ? React.createElement("img",{src:msg.imageUrl,style:{maxWidth:"220px",maxHeight:"220px",borderRadius:"10px",display:"block",marginTop:"4px",pointerEvents:"none"},draggable:false,alt:"img"}) : msg.text), /*#__PURE__*/React.createElement("div", {
+      className: "text-xs text-gray-300 mt-1 md:mt-2"
+    }, msg.timestamp))));
   })()), /*#__PURE__*/React.createElement("div", {
     className: "bg-black/70 backdrop-blur-md border-t border-red-600/30 px-3 md:px-8 py-3 md:py-5"
   },
-  showPrivateEmojiPicker && React.createElement("div",{style:{display:"flex",flexWrap:"wrap",gap:"6px",padding:"10px",background:"#111",borderRadius:"12px",marginBottom:"8px",maxHeight:"150px",overflowY:"auto"}},
-    EMOJIS.map(function(em){return React.createElement("button",{key:em,onClick:function(){setPrivateMessage(function(p){return p+em;});setShowPrivateEmojiPicker(false);},style:{fontSize:"22px",background:"none",border:"none",cursor:"pointer",padding:"2px"}},em);})
-  ),
-  React.createElement("input",{type:"file",accept:"image/*",ref:privateFileInputRef,style:{display:"none"},onChange:function(e){handleImageUpload(e.target.files[0],true);e.target.value="";}}),
+  showPrivateEmojiPicker && React.createElement("div",{style:{display:"flex",flexWrap:"wrap",gap:"6px",padding:"10px",background:"#111",borderRadius:"12px",marginBottom:"8px",maxHeight:"150px",overflowY:"auto"}},EMOJIS.map(function(em){return React.createElement("button",{key:em,onClick:function(){setPrivateMessage(function(p){return p+em;});setShowPrivateEmojiPicker(false);},style:{fontSize:"22px",background:"none",border:"none",cursor:"pointer",padding:"2px"}},em);})),
+  React.createElement("input",{type:"file",accept:"image/*",ref:privateFileInputRef,style:{display:"none"},onChange:function(ev){handleImageUpload(ev.target.files[0],true);ev.target.value="";}}),
   /*#__PURE__*/React.createElement("div", {
     className: "flex gap-2 md:gap-3"
   }, /*#__PURE__*/React.createElement("button", {
@@ -2163,8 +2025,8 @@ const BDSMChat = () => {
     className: "px-4 md:px-6 py-3 md:py-4 bg-red-600 hover:bg-red-700 rounded-xl flex-shrink-0"
   }, /*#__PURE__*/React.createElement(Send, {
     className: "w-5 h-5"
-  })), React.createElement("button",{onClick:function(){setShowPrivateEmojiPicker(function(p){return !p;});},className:"px-3 py-3 bg-black/50 border border-red-600/30 rounded-xl hover:bg-black/70 flex-shrink-0",style:{fontSize:"20px"}},"\uD83D\uDE00"),
-  React.createElement("button",{onClick:function(){privateFileInputRef.current&&privateFileInputRef.current.click();},className:"px-3 py-3 bg-black/50 border border-red-600/30 rounded-xl hover:bg-black/70 flex-shrink-0",style:{fontSize:"20px"}},"\uD83D\uDCF7"),
+  })), React.createElement("button",{onClick:function(){setShowPrivateEmojiPicker(function(p){return !p;});},className:"px-3 py-3 bg-black/50 border border-red-600/30 rounded-xl hover:bg-black/70 flex-shrink-0",style:{fontSize:"20px"}},"😀"),
+  React.createElement("button",{onClick:function(){privateFileInputRef.current&&privateFileInputRef.current.click();},className:"px-3 py-3 bg-black/50 border border-red-600/30 rounded-xl hover:bg-black/70 flex-shrink-0",style:{fontSize:"20px"}},"📷"),
   /*#__PURE__*/React.createElement("input", {
     type: "text",
     placeholder: `הודעה פרטית ל-${activePrivateChat}...`,
@@ -2224,12 +2086,11 @@ const BDSMChat = () => {
         setShowUsersSidebar(false);
       },
       className: "p-2 rounded-lg bg-blue-600/20 hover:bg-blue-600 transition-all",
+      style:{position:"relative"},
       title: "\u05E9\u05DC\u05D7 \u05D4\u05D5\u05D3\u05E2\u05D4 \u05E4\u05E8\u05D8\u05D9\u05EA"
     }, /*#__PURE__*/React.createElement(MessageSquare, {
       className: "w-4 h-4"
-    }), pmUnread[user.nickname] ? /*#__PURE__*/React.createElement("span", {
-      style: {position:'absolute',top:'-5px',right:'-5px',background:'#cc0000',color:'#fff',fontSize:'10px',fontWeight:'900',borderRadius:'50%',minWidth:'17px',height:'17px',display:'flex',alignItems:'center',justifyContent:'center',border:'2px solid #000'}
-    }, pmUnread[user.nickname] > 9 ? '9+' : pmUnread[user.nickname]) : null)));
+    }), pmUnread[user.nickname]?React.createElement("span",{style:{position:"absolute",top:"-5px",right:"-5px",background:"#cc0000",color:"#fff",fontSize:"10px",fontWeight:"900",borderRadius:"50%",minWidth:"17px",height:"17px",display:"flex",alignItems:"center",justifyContent:"center",border:"2px solid #000"}},pmUnread[user.nickname]>9?"9+":pmUnread[user.nickname]):null)));
   }), liveOnlineUsers.filter(u => u.nickname !== currentUser?.username).length === 0 && /*#__PURE__*/React.createElement("div", {
     className: "text-center text-gray-500 py-12"
   }, /*#__PURE__*/React.createElement("div", {
