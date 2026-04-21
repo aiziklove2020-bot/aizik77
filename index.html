@@ -679,40 +679,11 @@ const BDSMChat = () => {
   const [loginError, setLoginError] = useState('');
   const [loginChecking, setLoginChecking] = useState(false);
   useEffect(() => {
-    if (!isLoggedIn) {
-      // Restore session if nickname already stored in this browser
-      let storedUser = null;
-      try {
-        const raw = localStorage.getItem('bdsm_chat_user');
-        if (raw) storedUser = JSON.parse(raw);
-      } catch (e) {/* ignore */}
-      if (storedUser && storedUser.id && storedUser.username) {
-        // Force role to 'user' — this chat page never shows admin UI.
-        // Admin management happens on /admin (separate page, separate login).
-        storedUser.role = 'user';
-        // Make sure they're still not banned
-        if (typeof window.fbCheckBanned === 'function') {
-          window.fbCheckBanned(storedUser.username).then(isBanned => {
-            if (isBanned) {
-              try {
-                localStorage.removeItem('bdsm_chat_user');
-              } catch (e) {}
-              setLoginError('הכינוי שלך נחסם מהצ\'אט');
-            } else {
-              setCurrentUser(storedUser);
-              setIsLoggedIn(true);
-            }
-          }).catch(() => {
-            // On error, let them in optimistically
-            setCurrentUser(storedUser);
-            setIsLoggedIn(true);
-          });
-        } else {
-          setCurrentUser(storedUser);
-          setIsLoggedIn(true);
-        }
-      }
-    }
+    // Clear any previously stored session — we always require fresh nickname
+    // entry so that shared devices don't auto-login as the previous user.
+    try {
+      localStorage.removeItem('bdsm_chat_user');
+    } catch (e) {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const doNicknameLogin = async () => {
@@ -755,9 +726,7 @@ const BDSMChat = () => {
           online: true,
           banned: false
         };
-        try {
-          localStorage.setItem('bdsm_chat_user', JSON.stringify(newUser));
-        } catch (e) {}
+        // Do NOT persist to localStorage — force fresh nickname entry every visit
         setCurrentUser(newUser);
         setIsLoggedIn(true);
         setLoginNickname('');
@@ -805,7 +774,24 @@ const BDSMChat = () => {
     };
     doHeartbeat();
     const interval = setInterval(doHeartbeat, 30 * 1000);
-    return () => clearInterval(interval);
+
+    // Release nickname when user closes tab / navigates away
+    const handleUnload = () => {
+      if (typeof window.fbReleaseNickname === 'function' && currentUser) {
+        // Best-effort release. Browsers may not wait for async tasks on unload,
+        // but Firestore SDK uses sendBeacon internally where possible.
+        try {
+          window.fbReleaseNickname(currentUser.username, currentUser.id);
+        } catch (e) {}
+      }
+    };
+    window.addEventListener('pagehide', handleUnload);
+    window.addEventListener('beforeunload', handleUnload);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('pagehide', handleUnload);
+      window.removeEventListener('beforeunload', handleUnload);
+    };
   }, [isLoggedIn, currentUser]);
 
   // LIVE: subscribe to list of online users (chatNicknames collection)
