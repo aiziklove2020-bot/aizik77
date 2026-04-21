@@ -2087,14 +2087,20 @@ const BDSMChat = () => {
     }
     return msgs.map(msg => /*#__PURE__*/React.createElement("div", {
       key: msg._firestoreId || msg.from + msg.timestamp,
-      className: `flex ${msg.from === currentUser.username ? 'justify-end' : 'justify-start'}`
+      className: `flex justify-end`
     }, /*#__PURE__*/React.createElement("div", {
-      className: `px-4 md:px-5 py-2 md:py-3 rounded-2xl max-w-[85%] md:max-w-xl ${msg.from === currentUser.username ? 'bg-red-600' : 'bg-black/60 border border-red-600/20'}`
-    }, /*#__PURE__*/React.createElement("div", {
-      className: "text-white whitespace-pre-wrap break-words text-sm md:text-base"
-    }, msg.imageUrl ? React.createElement("img", {src:msg.imageUrl,style:{maxWidth:"220px",maxHeight:"220px",borderRadius:"10px",cursor:"pointer",display:"block",marginTop:"4px"},onClick:()=>window.open(msg.imageUrl,"_blank"),alt:"תמונה"}) : msg.text), /*#__PURE__*/React.createElement("div", {
-      className: "text-xs text-gray-300 mt-1 md:mt-2"
-    }, msg.timestamp))));
+      className: `${msg.imageUrl ? '' : 'px-4 md:px-5 py-2 md:py-3'} rounded-2xl max-w-[85%] md:max-w-xl ${msg.from === currentUser.username ? (msg.imageUrl ? '' : 'bg-red-600') : (msg.imageUrl ? '' : 'bg-black/60 border border-red-600/20')}`
+    }, msg.imageUrl ? React.createElement("div", {style:{textAlign: msg.from === currentUser.username ? "right" : "left"}},
+        React.createElement("img", {src:msg.imageUrl,style:{maxWidth:"220px",maxHeight:"220px",borderRadius:"12px",cursor:"pointer",display:"inline-block",border: msg.from === currentUser.username ? "2px solid #cc0000" : "2px solid #333"},onClick:()=>window.open(msg.imageUrl,"_blank"),alt:"תמונה"}),
+        React.createElement("div", {style:{fontSize:"11px",color:"#999",marginTop:"4px"}}, msg.timestamp)
+      ) : /*#__PURE__*/React.createElement("div", null,
+        /*#__PURE__*/React.createElement("div", {
+          className: "text-white whitespace-pre-wrap break-words text-sm md:text-base"
+        }, msg.text),
+        /*#__PURE__*/React.createElement("div", {
+          className: "text-xs text-gray-300 mt-1 md:mt-2"
+        }, msg.timestamp)
+      ))));
   })()), /*#__PURE__*/React.createElement("div", {
     className: "bg-black/70 backdrop-blur-md border-t border-red-600/30 px-3 md:px-8 py-3 md:py-5"
   },
