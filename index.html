@@ -63,10 +63,10 @@
   <div id="debug-panel"><div class="title">🐛 DEBUG LOG</div></div>
 
   <script>
-    // Global debug logger
+    // Debug logger — only active when ?debug is in URL
     (function() {
       const urlParams = new URLSearchParams(window.location.search);
-      const debugMode = urlParams.has('debug') || urlParams.get('admin') === '2109';
+      const debugMode = urlParams.has('debug');
       if (debugMode) {
         document.getElementById('debug-toggle').classList.add('visible');
         document.getElementById('debug-panel').classList.add('visible');
@@ -107,7 +107,8 @@
         await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js');
       const {
         getFirestore, collection, addDoc, query, where, orderBy,
-        onSnapshot, serverTimestamp, deleteDoc, doc, limit
+        onSnapshot, serverTimestamp, deleteDoc, doc, limit,
+        setDoc, getDoc, getDocs
       } = await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js');
       log('✅ Firebase SDK נטען', 'ok');
 
@@ -135,6 +136,91 @@
 
       window.fbDeleteMessage = async (firestoreId) => {
         return await deleteDoc(doc(db, 'chatMessages', firestoreId));
+      };
+
+      // Normalize nickname for use as document ID (Firestore forbids '/')
+      const nickKey = (nick) => String(nick).trim().toLowerCase().replace(/[\/\\\s\.\#\$\[\]]/g, '_');
+
+      // Claim a nickname. Returns {ok:true, userId} on success, {ok:false, reason:'taken'|'banned'} on failure.
+      window.fbClaimNickname = async (nickname) => {
+        const key = nickKey(nickname);
+        if (!key) return { ok: false, reason: 'invalid' };
+        try {
+          // Check ban list first
+          const banRef = doc(db, 'chatBans', key);
+          const banSnap = await getDoc(banRef);
+          if (banSnap.exists()) return { ok: false, reason: 'banned' };
+
+          // Check if nickname is already claimed
+          const nickRef = doc(db, 'chatNicknames', key);
+          const nickSnap = await getDoc(nickRef);
+          if (nickSnap.exists()) {
+            const data = nickSnap.data();
+            // If last seen within 60 seconds, it's still "online" → taken.
+            // Otherwise allow reclaim (covers users closing tab without logout).
+            const lastAt = data.lastSeenAt && data.lastSeenAt.seconds ? data.lastSeenAt.seconds * 1000 : 0;
+            if (Date.now() - lastAt < 60 * 1000) {
+              return { ok: false, reason: 'taken' };
+            }
+          }
+
+          const userId = 'u_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
+          await setDoc(nickRef, {
+            nickname: nickname.trim(),
+            userId: userId,
+            claimedAt: serverTimestamp(),
+            lastSeenAt: serverTimestamp()
+          });
+          log('✅ כינוי "' + nickname + '" נתפס (userId=' + userId + ')', 'ok');
+          return { ok: true, userId: userId };
+        } catch (err) {
+          log('❌ fbClaimNickname error: ' + err.message, 'err');
+          return { ok: false, reason: err.message };
+        }
+      };
+
+      // Release a nickname (called on logout)
+      window.fbReleaseNickname = async (nickname, userId) => {
+        const key = nickKey(nickname);
+        if (!key) return;
+        try {
+          // Only release if we own it (matching userId)
+          const nickRef = doc(db, 'chatNicknames', key);
+          const snap = await getDoc(nickRef);
+          if (snap.exists() && snap.data().userId === userId) {
+            await deleteDoc(nickRef);
+            log('🚪 כינוי "' + nickname + '" שוחרר', 'info');
+          }
+        } catch (err) {
+          // Silent
+        }
+      };
+
+      // Check if a nickname is banned
+      window.fbCheckBanned = async (nickname) => {
+        const key = nickKey(nickname);
+        if (!key) return false;
+        try {
+          const snap = await getDoc(doc(db, 'chatBans', key));
+          return snap.exists();
+        } catch (err) {
+          return false;
+        }
+      };
+
+      // Periodic "heartbeat" to keep nickname reservation fresh
+      window.fbHeartbeat = async (nickname, userId) => {
+        const key = nickKey(nickname);
+        if (!key) return;
+        try {
+          await setDoc(doc(db, 'chatNicknames', key), {
+            nickname: nickname.trim(),
+            userId: userId,
+            lastSeenAt: serverTimestamp()
+          }, { merge: true });
+        } catch (err) {
+          // Silent
+        }
       };
 
       window.fbSubscribeToRoom = (roomName, callback) => {
@@ -478,11 +564,7 @@ const BDSMChat = () => {
     if (currentUser?.role === 'admin') {
       const msg = messages[messageIndex];
       if (window.confirm('האם למחוק הודעה זו?')) {
-        if (msg && msg._firestoreId && typeof window.fbDeleteMessage === 'function') {
-          window.fbDeleteMessage(msg._firestoreId).catch(err => console.error('Delete failed:', err));
-        } else {
-          setMessages(messages.filter((_, idx) => idx !== messageIndex));
-        }
+        setMessages(messages.filter((_, idx) => idx !== messageIndex));
         addAdminLog(`מחק הודעה מ-${msg.user}: "${msg.text.substring(0, 30)}..."`);
       }
     }
@@ -520,58 +602,80 @@ const BDSMChat = () => {
     });
   }, [messages]);
 
-  // AUTO-LOGIN ON MOUNT as a regular user (not guest) — no registration required,
-  // and no "guest restrictions" applied. Each browser gets a persistent random
-  // identity stored in localStorage.
-  //
-  // ADMIN ACCESS: add ?admin=2109 to the URL to become admin.
-  // Example: https://aizik77.vercel.app/?admin=2109
+  // Nickname-based login. User must type a nickname. Check for bans & uniqueness.
+  // Stored in localStorage so refresh doesn't kick them out.
+  const [loginNickname, setLoginNickname] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [loginChecking, setLoginChecking] = useState(false);
   useEffect(() => {
     if (!isLoggedIn) {
-      // Check for admin URL param
-      const urlParams = new URLSearchParams(window.location.search);
-      const adminCode = urlParams.get('admin');
-      if (adminCode === '2109') {
-        const adminUser = {
-          id: 'admin_main',
-          username: 'admin',
-          password: '2109',
-          role: 'admin',
-          online: true,
-          banned: false
-        };
-        try {
-          localStorage.setItem('bdsm_chat_user', JSON.stringify(adminUser));
-        } catch (e) {}
-        setCurrentUser(adminUser);
-        setIsGuest(false);
-        setIsLoggedIn(true);
-        return;
-      }
+      // Restore session if nickname already stored in this browser
       let storedUser = null;
       try {
         const raw = localStorage.getItem('bdsm_chat_user');
         if (raw) storedUser = JSON.parse(raw);
       } catch (e) {/* ignore */}
       if (storedUser && storedUser.id && storedUser.username) {
-        // Upgrade old "guest" role to "user" so the banner disappears for
-        // returning visitors who were created under the old default
-        if (storedUser.role === 'guest' || !storedUser.role) {
-          storedUser.role = 'user';
-          if (storedUser.username && storedUser.username.indexOf('אורח_') === 0) {
-            storedUser.username = 'משתמש_' + storedUser.username.substring(5);
-          }
-          try {
-            localStorage.setItem('bdsm_chat_user', JSON.stringify(storedUser));
-          } catch (e) {}
+        // Make sure they're still not banned
+        if (typeof window.fbCheckBanned === 'function') {
+          window.fbCheckBanned(storedUser.username).then(isBanned => {
+            if (isBanned) {
+              try {
+                localStorage.removeItem('bdsm_chat_user');
+              } catch (e) {}
+              setLoginError('הכינוי שלך נחסם מהצ\'אט');
+            } else {
+              setCurrentUser(storedUser);
+              setIsLoggedIn(true);
+            }
+          }).catch(() => {
+            // On error, let them in optimistically
+            setCurrentUser(storedUser);
+            setIsLoggedIn(true);
+          });
+        } else {
+          setCurrentUser(storedUser);
+          setIsLoggedIn(true);
         }
-        setCurrentUser(storedUser);
-        setIsGuest(false);
-      } else {
-        const num = Math.floor(Math.random() * 10000);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const doNicknameLogin = async () => {
+    setLoginError('');
+    const nick = (loginNickname || '').trim();
+    if (!nick) {
+      setLoginError('אנא הזן כינוי');
+      return;
+    }
+    if (nick.length < 2) {
+      setLoginError('הכינוי קצר מדי (מינימום 2 תווים)');
+      return;
+    }
+    if (nick.length > 30) {
+      setLoginError('הכינוי ארוך מדי (מקסימום 30 תווים)');
+      return;
+    }
+    setLoginChecking(true);
+    try {
+      if (typeof window.fbCheckBanned === 'function') {
+        const banned = await window.fbCheckBanned(nick);
+        if (banned) {
+          setLoginError('כינוי זה נחסם מהצ\'אט');
+          setLoginChecking(false);
+          return;
+        }
+      }
+      if (typeof window.fbClaimNickname === 'function') {
+        const result = await window.fbClaimNickname(nick);
+        if (!result.ok) {
+          setLoginError(result.reason === 'taken' ? 'כינוי זה כבר בשימוש - בחר אחר' : 'שגיאה: ' + (result.reason || 'לא ידוע'));
+          setLoginChecking(false);
+          return;
+        }
         const newUser = {
-          id: 'u_' + Date.now() + '_' + num,
-          username: 'משתמש_' + num,
+          id: result.userId,
+          username: nick,
           password: '',
           role: 'user',
           online: true,
@@ -581,12 +685,17 @@ const BDSMChat = () => {
           localStorage.setItem('bdsm_chat_user', JSON.stringify(newUser));
         } catch (e) {}
         setCurrentUser(newUser);
-        setIsGuest(false);
+        setIsLoggedIn(true);
+        setLoginNickname('');
+      } else {
+        // Firebase not ready yet
+        setLoginError('המערכת עוד טוענת, נסה שוב בעוד רגע...');
       }
-      setIsLoggedIn(true);
+    } catch (err) {
+      setLoginError('שגיאה: ' + (err.message || String(err)));
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    setLoginChecking(false);
+  };
 
   // FIRESTORE: real-time message subscription for the current room.
   // Firebase loads asynchronously (ES module import), so we must keep polling/retrying
@@ -602,7 +711,6 @@ const BDSMChat = () => {
           if (!cancelled) setMessages(msgs);
         });
       } else {
-        // Firebase not ready yet — retry in 200ms
         setTimeout(tryStart, 200);
       }
     };
@@ -612,6 +720,19 @@ const BDSMChat = () => {
       if (typeof unsubscribe === 'function') unsubscribe();
     };
   }, [isLoggedIn, currentRoom]);
+
+  // Heartbeat to keep nickname reservation alive (every 30 seconds)
+  useEffect(() => {
+    if (!isLoggedIn || !currentUser) return;
+    const doHeartbeat = () => {
+      if (typeof window.fbHeartbeat === 'function') {
+        window.fbHeartbeat(currentUser.username, currentUser.id);
+      }
+    };
+    doHeartbeat();
+    const interval = setInterval(doHeartbeat, 30 * 1000);
+    return () => clearInterval(interval);
+  }, [isLoggedIn, currentUser]);
 
   // Authentication Functions
   const handleLogin = (username, password) => {
@@ -698,15 +819,17 @@ const BDSMChat = () => {
     return currentUser.username;
   };
   const handleLogout = () => {
-    const updatedUsers = users.map(u => u.id === currentUser.id ? {
-      ...u,
-      online: false
-    } : u);
-    setUsers(updatedUsers);
-    addSystemMessage(`${currentUser.username} התנתק`);
+    if (currentUser && typeof window.fbReleaseNickname === 'function') {
+      window.fbReleaseNickname(currentUser.username, currentUser.id).catch(() => {});
+    }
+    try {
+      localStorage.removeItem('bdsm_chat_user');
+    } catch (e) {}
     setCurrentUser(null);
     setIsLoggedIn(false);
     setCurrentView('chat');
+    setMaskMode(false);
+    setSelectedMask(null);
   };
 
   // Message Functions
@@ -731,26 +854,16 @@ const BDSMChat = () => {
       };
       const messageToSend = newMessage;
       setNewMessage('');
-
-      // Debug log
-      if (window.__debugLog) window.__debugLog('📤 שולח הודעה: "' + userMsg.text + '" לחדר: ' + currentRoom);
-
-      // Check if Firebase is ready
       if (typeof window.fbSendMessage !== 'function') {
-        const msg = '❌ Firebase לא טעון. בדוק Console (F12) לשגיאות.';
-        if (window.__debugLog) window.__debugLog(msg);
-        alert(msg);
+        alert('המערכת עוד טוענת, נסה שוב בעוד רגע');
         setNewMessage(messageToSend);
         return;
       }
       try {
         await window.fbSendMessage(userMsg);
-        if (window.__debugLog) window.__debugLog('✅ הודעה נשלחה בהצלחה ל-Firebase');
       } catch (error) {
-        console.error('Failed to send message to Firestore:', error);
-        const errMsg = error && error.code ? '[' + error.code + '] ' + error.message : String(error);
-        if (window.__debugLog) window.__debugLog('❌ שגיאה: ' + errMsg);
-        alert('שגיאה בשליחת ההודעה:\n\n' + errMsg + '\n\nצלם את הMessage הזה ושלח לClaude.');
+        console.error('Failed to send message:', error);
+        alert('שגיאה בשליחת ההודעה: ' + (error.message || String(error)));
         setNewMessage(messageToSend);
       }
     }
@@ -888,14 +1001,8 @@ const BDSMChat = () => {
     }, /*#__PURE__*/React.createElement("div", {
       className: "absolute inset-0 stars-bg"
     }), /*#__PURE__*/React.createElement("style", null, `
-          @import url('https://fonts.googleapis.com/css2?family=Assistant:wght@200;300;400;600;700;800&family=Inter:wght@900&display=swap');
-          
-          * {
-            font-family: 'Assistant', sans-serif;
-          }
-          
           .stars-bg {
-            background: 
+            background:
               radial-gradient(2px 2px at 10% 20%, white, transparent),
               radial-gradient(2px 2px at 25% 40%, white, transparent),
               radial-gradient(1px 1px at 40% 10%, white, transparent),
@@ -909,24 +1016,9 @@ const BDSMChat = () => {
             background-size: 100% 100%;
             animation: twinkle 3s ease-in-out infinite alternate;
           }
-          
           @keyframes twinkle {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
-          }
-          
-          .glass-panel {
-            background: rgba(10, 10, 10, 0.6);
-            backdrop-filter: blur(20px);
-            border: 1px solid rgba(255, 255, 255, 0.05);
-          }
-          
-          .logo-glow {
-            text-shadow: 0 0 30px rgba(204, 0, 0, 0.4);
-          }
-          
-          .hero-gradient {
-            background: radial-gradient(circle at center, rgba(204, 0, 0, 0.12) 0%, rgba(0, 0, 0, 0) 70%);
           }
         `), /*#__PURE__*/React.createElement("div", {
       className: "relative z-10 glass-panel p-10 rounded-3xl shadow-2xl max-w-lg w-full"
@@ -952,7 +1044,7 @@ const BDSMChat = () => {
         fontStyle: 'italic'
       }
     }, "\u05D1\u05D3\u05E1\u05DE")), /*#__PURE__*/React.createElement("div", {
-      className: "english-sub text-white text-sm tracking-widest font-black",
+      className: "text-white text-sm tracking-widest font-black",
       style: {
         fontFamily: 'Inter, sans-serif',
         letterSpacing: '0.6em'
@@ -962,100 +1054,30 @@ const BDSMChat = () => {
       style: {
         letterSpacing: '0.3em'
       }
-    }, "SAFE \xB7 SANE \xB7 CONSENSUAL"))), !showRegister ?
-    /*#__PURE__*/
-    // Login Form
-    React.createElement("div", {
+    }, "SAFE \xB7 SANE \xB7 CONSENSUAL"))), /*#__PURE__*/React.createElement("div", {
       className: "space-y-4"
     }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
       className: "block text-sm font-medium text-gray-300 mb-2 text-right"
-    }, "\u05E9\u05DD \u05DE\u05E9\u05EA\u05DE\u05E9"), /*#__PURE__*/React.createElement("input", {
+    }, "\u05D1\u05D7\u05E8 \u05DB\u05D9\u05E0\u05D5\u05D9 \u05DC\u05E6'\u05D0\u05D8"), /*#__PURE__*/React.createElement("input", {
       type: "text",
-      id: "loginUsername",
-      placeholder: "\u05D4\u05D6\u05DF \u05E9\u05DD \u05DE\u05E9\u05EA\u05DE\u05E9",
-      className: "w-full px-5 py-4 bg-black/50 border border-red-600/30 rounded-xl text-white text-lg placeholder-gray-500 focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/20 text-right",
+      value: loginNickname,
+      onChange: e => setLoginNickname(e.target.value),
       onKeyPress: e => {
-        if (e.key === 'Enter') {
-          const password = document.getElementById('loginPassword').value;
-          handleLogin(e.target.value, password);
-        }
-      }
-    })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
-      className: "block text-sm font-medium text-gray-300 mb-2 text-right"
-    }, "\u05E1\u05D9\u05E1\u05DE\u05D4"), /*#__PURE__*/React.createElement("input", {
-      type: "password",
-      id: "loginPassword",
-      placeholder: "\u05D4\u05D6\u05DF \u05E1\u05D9\u05E1\u05DE\u05D4",
-      className: "w-full px-5 py-4 bg-black/50 border border-red-600/30 rounded-xl text-white text-lg placeholder-gray-500 focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/20 text-right",
-      onKeyPress: e => {
-        if (e.key === 'Enter') {
-          const username = document.getElementById('loginUsername').value;
-          handleLogin(username, e.target.value);
-        }
-      }
-    })), /*#__PURE__*/React.createElement("button", {
-      onClick: () => {
-        const username = document.getElementById('loginUsername').value;
-        const password = document.getElementById('loginPassword').value;
-        handleLogin(username, password);
+        if (e.key === 'Enter' && !loginChecking) doNicknameLogin();
       },
-      className: "w-full px-5 py-4 bg-red-600 hover:bg-red-700 text-white text-lg rounded-xl font-semibold transition-all shadow-lg"
-    }, "\u05DB\u05E0\u05D9\u05E1\u05D4"), /*#__PURE__*/React.createElement("button", {
-      onClick: () => setShowRegister(true),
-      className: "w-full px-5 py-4 bg-black/50 hover:bg-black/70 border border-red-600/30 text-white text-lg rounded-xl font-semibold transition-all"
-    }, "\u05D4\u05E8\u05E9\u05DE\u05D4"), /*#__PURE__*/React.createElement("div", {
-      className: "relative my-6"
-    }, /*#__PURE__*/React.createElement("div", {
-      className: "absolute inset-0 flex items-center"
-    }, /*#__PURE__*/React.createElement("div", {
-      className: "w-full border-t border-red-600/20"
-    })), /*#__PURE__*/React.createElement("div", {
-      className: "relative flex justify-center text-sm"
-    }, /*#__PURE__*/React.createElement("span", {
-      className: "px-4 bg-black/90 text-gray-400"
-    }, "\u05D0\u05D5"))), /*#__PURE__*/React.createElement("button", {
-      onClick: handleGuestLogin,
-      className: "w-full px-5 py-4 bg-gray-700 hover:bg-gray-600 text-white text-lg rounded-xl font-semibold transition-all"
-    }, "\u05DB\u05E0\u05D9\u05E1\u05D4 \u05DB\u05D0\u05D5\u05E8\u05D7 (\u05D2\u05D9\u05E9\u05D4 \u05DE\u05D5\u05D2\u05D1\u05DC\u05EA)")) :
-    /*#__PURE__*/
-    // Register Form
-    React.createElement("div", {
-      className: "space-y-4"
-    }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
-      className: "block text-sm font-medium text-gray-300 mb-2 text-right"
-    }, "\u05E9\u05DD \u05DE\u05E9\u05EA\u05DE\u05E9"), /*#__PURE__*/React.createElement("input", {
-      type: "text",
-      value: regUsername,
-      onChange: e => setRegUsername(e.target.value),
-      placeholder: "\u05D1\u05D7\u05E8 \u05E9\u05DD \u05DE\u05E9\u05EA\u05DE\u05E9",
-      className: "w-full px-5 py-4 bg-black/50 border border-red-600/30 rounded-xl text-white text-lg placeholder-gray-500 focus:outline-none focus:border-red-500 text-right"
-    })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
-      className: "block text-sm font-medium text-gray-300 mb-2 text-right"
-    }, "\u05E1\u05D9\u05E1\u05DE\u05D4"), /*#__PURE__*/React.createElement("input", {
-      type: "password",
-      value: regPassword,
-      onChange: e => setRegPassword(e.target.value),
-      placeholder: "\u05D1\u05D7\u05E8 \u05E1\u05D9\u05E1\u05DE\u05D4",
-      className: "w-full px-5 py-4 bg-black/50 border border-red-600/30 rounded-xl text-white text-lg placeholder-gray-500 focus:outline-none focus:border-red-500 text-right"
-    })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
-      className: "block text-sm font-medium text-gray-300 mb-2 text-right"
-    }, "\u05D0\u05D9\u05DE\u05D5\u05EA \u05E1\u05D9\u05E1\u05DE\u05D4"), /*#__PURE__*/React.createElement("input", {
-      type: "password",
-      value: regConfirmPassword,
-      onChange: e => setRegConfirmPassword(e.target.value),
-      placeholder: "\u05D4\u05D6\u05DF \u05E1\u05D9\u05E1\u05DE\u05D4 \u05E9\u05D5\u05D1",
-      className: "w-full px-5 py-4 bg-black/50 border border-red-600/30 rounded-xl text-white text-lg placeholder-gray-500 focus:outline-none focus:border-red-500 text-right"
-    })), /*#__PURE__*/React.createElement("button", {
-      onClick: handleRegister,
-      className: "w-full px-5 py-4 bg-red-600 hover:bg-red-700 text-white text-lg rounded-xl font-semibold transition-all shadow-lg"
-    }, "\u05D4\u05E8\u05E9\u05DD"), /*#__PURE__*/React.createElement("button", {
-      onClick: () => setShowRegister(false),
-      className: "w-full px-5 py-4 bg-black/50 hover:bg-black/70 border border-red-600/30 text-white text-lg rounded-xl font-semibold transition-all"
-    }, "\u05D7\u05D6\u05D5\u05E8 \u05DC\u05D4\u05EA\u05D7\u05D1\u05E8\u05D5\u05EA")), /*#__PURE__*/React.createElement("div", {
-      className: "mt-8 pt-6 border-t border-red-600/20 text-center"
-    }, /*#__PURE__*/React.createElement("p", {
-      className: "text-sm text-gray-500"
-    }, "\u05DE\u05E9\u05EA\u05DE\u05E9 \u05DC\u05D3\u05D5\u05D2\u05DE\u05D4: admin / 2109"))));
+      placeholder: "\u05D4\u05D6\u05DF \u05DB\u05D9\u05E0\u05D5\u05D9 (2-30 \u05EA\u05D5\u05D5\u05D9\u05DD)",
+      maxLength: 30,
+      autoFocus: true,
+      className: "w-full px-5 py-4 bg-black/50 border border-red-600/30 rounded-xl text-white text-lg placeholder-gray-500 focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/20 text-right"
+    })), loginError && /*#__PURE__*/React.createElement("div", {
+      className: "bg-red-900/40 border border-red-600/50 rounded-xl px-4 py-3 text-red-200 text-sm text-right"
+    }, "\u26A0\uFE0F ", loginError), /*#__PURE__*/React.createElement("button", {
+      onClick: doNicknameLogin,
+      disabled: loginChecking || !loginNickname.trim(),
+      className: "w-full px-5 py-4 bg-red-600 hover:bg-red-700 disabled:bg-gray-700 disabled:cursor-not-allowed text-white text-lg rounded-xl font-semibold transition-all shadow-lg"
+    }, loginChecking ? 'בודק כינוי...' : 'כנס לצ\'אט'), /*#__PURE__*/React.createElement("p", {
+      className: "text-center text-gray-500 text-xs mt-4"
+    }, "\u05D4\u05DB\u05D9\u05E0\u05D5\u05D9 \u05E9\u05DC\u05DA \u05D7\u05D9\u05D9\u05D1 \u05DC\u05D4\u05D9\u05D5\u05EA \u05D9\u05D9\u05D7\u05D5\u05D3\u05D9. \u05DB\u05DC \u05D4\u05D5\u05D3\u05E2\u05D4 \u05E9\u05EA\u05E9\u05DC\u05D7 \u05EA\u05D5\u05E4\u05D9\u05E2 \u05E2\u05DD \u05D4\u05DB\u05D9\u05E0\u05D5\u05D9 \u05E9\u05D1\u05D7\u05E8\u05EA."))));
   }
   const onlineUsers = users.filter(u => u.online && u.id !== currentUser.id);
   const currentRoomData = rooms.find(r => r.name === currentRoom);

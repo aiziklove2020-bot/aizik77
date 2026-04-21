@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ניהול - BDSM Chat</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Assistant:wght@200;300;400;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    * { font-family: 'Assistant', sans-serif; }
+    body { margin: 0; background: #000; color: #fff; }
+    #root { min-height: 100vh; }
+    .glass-panel { background: rgba(10,10,10,0.6); backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.05); }
+    .loader { display: flex; align-items: center; justify-content: center; height: 100vh; color: #888; flex-direction: column; gap: 16px; }
+    .spinner { width: 40px; height: 40px; border: 3px solid #333; border-top-color: #cc0000; border-radius: 50%; animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div class="loader"><div class="spinner"></div><div>טוען פאנל ניהול...</div></div>
+  </div>
+
+  <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+
+  <script type="module">
+    const { initializeApp } = await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js');
+    const {
+      getFirestore, collection, query, where, orderBy, onSnapshot,
+      deleteDoc, doc, setDoc, getDoc, getDocs, serverTimestamp, addDoc
+    } = await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js');
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyAJv0APn-Qmv59H2Behu3PhskObCaPHW_A",
+      authDomain: "tbdsm-5acca.firebaseapp.com",
+      projectId: "tbdsm-5acca",
+      storageBucket: "tbdsm-5acca.firebasestorage.app",
+      messagingSenderId: "905865425928",
+      appId: "1:905865425928:web:1898ebb5b8de87ecf3cdbd",
+      measurementId: "G-FRE3N3T6JH"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+
+    const nickKey = (nick) => String(nick).trim().toLowerCase().replace(/[\/\\\s\.\#\$\[\]]/g, '_');
+
+    window.adminSubscribeMessages = (callback) => {
+      const q = query(collection(db, 'chatMessages'));
+      return onSnapshot(q, (snapshot) => {
+        const msgs = snapshot.docs.map(d => Object.assign({}, d.data(), { _firestoreId: d.id }));
+        msgs.sort((a, b) => {
+          const aT = a.createdAt && a.createdAt.seconds ? a.createdAt.seconds : 0;
+          const bT = b.createdAt && b.createdAt.seconds ? b.createdAt.seconds : 0;
+          return bT - aT; // newest first for admin
+        });
+        callback(msgs);
+      });
+    };
+
+    window.adminSubscribeOnline = (callback) => {
+      const q = query(collection(db, 'chatNicknames'));
+      return onSnapshot(q, (snapshot) => {
+        const users = snapshot.docs.map(d => Object.assign({}, d.data(), { _id: d.id }));
+        // Only "online" if last seen within last 90 seconds
+        const cutoff = Date.now() - 90 * 1000;
+        const online = users.filter(u => u.lastSeenAt && u.lastSeenAt.seconds * 1000 > cutoff);
+        callback(online);
+      });
+    };
+
+    window.adminSubscribeBans = (callback) => {
+      const q = query(collection(db, 'chatBans'));
+      return onSnapshot(q, (snapshot) => {
+        callback(snapshot.docs.map(d => Object.assign({}, d.data(), { _id: d.id })));
+      });
+    };
+
+    window.adminDeleteMessage = async (id) => deleteDoc(doc(db, 'chatMessages', id));
+
+    window.adminBanNickname = async (nickname, reason) => {
+      const key = nickKey(nickname);
+      if (!key) return;
+      await setDoc(doc(db, 'chatBans', key), {
+        nickname: nickname,
+        reason: reason || '',
+        bannedAt: serverTimestamp()
+      });
+      // Also remove the active nickname claim so they get kicked
+      try { await deleteDoc(doc(db, 'chatNicknames', key)); } catch (e) {}
+    };
+
+    window.adminUnbanNickname = async (nickname) => {
+      const key = nickKey(nickname);
+      if (!key) return;
+      await deleteDoc(doc(db, 'chatBans', key));
+    };
+
+    window.adminKickUser = async (nickname) => {
+      const key = nickKey(nickname);
+      if (!key) return;
+      await deleteDoc(doc(db, 'chatNicknames', key));
+    };
+
+    window.adminLog = async (action) => {
+      await addDoc(collection(db, 'chatAdminLogs'), {
+        action: action,
+        at: serverTimestamp()
+      });
+    };
+
+    window.adminReady = true;
+    window.dispatchEvent(new Event('admin-ready'));
+  </script>
+
+  <script>
+    // Wait for admin-ready before mounting
+    function ready(fn) {
+      if (window.adminReady) fn();
+      else window.addEventListener('admin-ready', fn, { once: true });
+    }
+
+    ready(function() {
+      const { useState, useEffect } = React;
+      const e = React.createElement;
+
+      // ─── Admin Login Screen ───────────────────────────────────────
+      function AdminLogin({ onSuccess }) {
+        const [username, setUsername] = useState('');
+        const [password, setPassword] = useState('');
+        const [error, setError] = useState('');
+
+        const doLogin = () => {
+          // ===== שם משתמש וסיסמה של האדמין =====
+          // כדי לשנות - ערוך את שתי השורות האלה ופרסם מחדש
+          const ADMIN_USERNAME = 'admin';
+          const ADMIN_PASSWORD = '2109';
+
+          if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
+            try { sessionStorage.setItem('admin_ok', '1'); } catch(e){}
+            onSuccess();
+          } else {
+            setError('שם משתמש או סיסמה שגויים');
+          }
+        };
+
+        return e('div', { className: 'min-h-screen bg-black flex items-center justify-center p-4' },
+          e('div', { className: 'glass-panel p-10 rounded-3xl max-w-md w-full' },
+            e('div', { className: 'text-center mb-8' },
+              e('div', { className: 'text-5xl font-black italic', style: { color: '#CC0000' } }, '🛡️ ניהול'),
+              e('div', { className: 'text-white text-sm mt-2' }, 'פאנל ניהול מדברים בדסמ')
+            ),
+            e('div', { className: 'space-y-4' },
+              e('div', null,
+                e('label', { className: 'block text-sm text-gray-300 mb-2 text-right' }, 'שם משתמש'),
+                e('input', {
+                  type: 'text',
+                  value: username,
+                  onChange: (ev) => setUsername(ev.target.value),
+                  onKeyPress: (ev) => { if (ev.key === 'Enter') doLogin(); },
+                  autoFocus: true,
+                  className: 'w-full px-5 py-4 bg-black/50 border border-red-600/30 rounded-xl text-white text-lg text-right focus:outline-none focus:border-red-500'
+                })
+              ),
+              e('div', null,
+                e('label', { className: 'block text-sm text-gray-300 mb-2 text-right' }, 'סיסמה'),
+                e('input', {
+                  type: 'password',
+                  value: password,
+                  onChange: (ev) => setPassword(ev.target.value),
+                  onKeyPress: (ev) => { if (ev.key === 'Enter') doLogin(); },
+                  className: 'w-full px-5 py-4 bg-black/50 border border-red-600/30 rounded-xl text-white text-lg text-right focus:outline-none focus:border-red-500'
+                })
+              ),
+              error && e('div', { className: 'bg-red-900/40 border border-red-600/50 rounded-xl px-4 py-3 text-red-200 text-sm text-right' }, '⚠️ ' + error),
+              e('button', {
+                onClick: doLogin,
+                className: 'w-full px-5 py-4 bg-red-600 hover:bg-red-700 text-white text-lg rounded-xl font-semibold'
+              }, 'כניסה')
+            ),
+            e('div', { className: 'text-center mt-6' },
+              e('a', { href: '/', className: 'text-gray-400 hover:text-white text-sm' }, '← חזרה לצ\'אט')
+            )
+          )
+        );
+      }
+
+      // ─── Admin Dashboard ──────────────────────────────────────────
+      function AdminDashboard() {
+        const [tab, setTab] = useState('dashboard');
+        const [messages, setMessages] = useState([]);
+        const [online, setOnline] = useState([]);
+        const [bans, setBans] = useState([]);
+
+        useEffect(() => {
+          const u1 = window.adminSubscribeMessages(setMessages);
+          const u2 = window.adminSubscribeOnline(setOnline);
+          const u3 = window.adminSubscribeBans(setBans);
+          return () => { u1(); u2(); u3(); };
+        }, []);
+
+        const doLogout = () => {
+          try { sessionStorage.removeItem('admin_ok'); } catch(e){}
+          window.location.reload();
+        };
+
+        const confirmDelete = async (msg) => {
+          if (!window.confirm('למחוק הודעה מ-' + msg.user + '?\n\n"' + (msg.text || '').substring(0, 60) + '"')) return;
+          try {
+            await window.adminDeleteMessage(msg._firestoreId);
+            await window.adminLog('מחק הודעה מ-' + (msg.realUser || msg.user));
+          } catch (e) { alert('שגיאה: ' + e.message); }
+        };
+
+        const confirmBan = async (user) => {
+          const nickname = user.realUser || user.user || user.nickname;
+          if (!nickname) { alert('לא ידוע כינוי'); return; }
+          const reason = window.prompt('סיבת החסימה של ' + nickname + ':', '');
+          if (reason === null) return;
+          try {
+            await window.adminBanNickname(nickname, reason);
+            await window.adminLog('חסם משתמש: ' + nickname + (reason ? ' (' + reason + ')' : ''));
+            alert('המשתמש "' + nickname + '" נחסם');
+          } catch (e) { alert('שגיאה: ' + e.message); }
+        };
+
+        const confirmUnban = async (nickname) => {
+          if (!window.confirm('לבטל חסימת "' + nickname + '"?')) return;
+          try {
+            await window.adminUnbanNickname(nickname);
+            await window.adminLog('ביטל חסימה: ' + nickname);
+          } catch (e) { alert('שגיאה: ' + e.message); }
+        };
+
+        const confirmKick = async (nickname) => {
+          if (!window.confirm('לבעוט את "' + nickname + '" מהצ\'אט?')) return;
+          try {
+            await window.adminKickUser(nickname);
+            await window.adminLog('בעט משתמש: ' + nickname);
+          } catch (e) { alert('שגיאה: ' + e.message); }
+        };
+
+        const todayCount = messages.filter(m => {
+          if (!m.createdAt || !m.createdAt.seconds) return false;
+          return (Date.now() - m.createdAt.seconds * 1000) < 24 * 60 * 60 * 1000;
+        }).length;
+
+        const messagesByRoom = {};
+        messages.forEach(m => {
+          messagesByRoom[m.room || 'כללי'] = (messagesByRoom[m.room || 'כללי'] || 0) + 1;
+        });
+
+        return e('div', { className: 'min-h-screen bg-black text-white flex' },
+          // Sidebar
+          e('div', { className: 'w-64 bg-black/80 border-l border-red-600/20 p-6 flex flex-col' },
+            e('div', { className: 'text-3xl font-black italic mb-2', style: { color: '#CC0000' } }, '🛡️ ניהול'),
+            e('div', { className: 'text-gray-400 text-xs mb-8' }, 'מחובר כאדמין'),
+            e('nav', { className: 'flex-1 space-y-2' },
+              [
+                { id: 'dashboard', label: '📊 דשבורד' },
+                { id: 'messages', label: '💬 כל ההודעות (' + messages.length + ')' },
+                { id: 'online', label: '🟢 מחוברים (' + online.length + ')' },
+                { id: 'bans', label: '🚫 חסומים (' + bans.length + ')' }
+              ].map(t => e('button', {
+                key: t.id,
+                onClick: () => setTab(t.id),
+                className: 'w-full px-4 py-3 text-right rounded-xl transition-all ' + (tab === t.id ? 'bg-red-600 text-white' : 'text-gray-300 hover:bg-white/5')
+              }, t.label))
+            ),
+            e('a', { href: '/', className: 'block text-center py-3 text-gray-400 hover:text-white text-sm border-t border-red-600/20 mt-4 pt-4' }, '← חזרה לצ\'אט'),
+            e('button', { onClick: doLogout, className: 'w-full py-3 mt-2 bg-black/50 hover:bg-black/70 text-white rounded-xl text-sm border border-red-600/30' }, 'התנתק מניהול')
+          ),
+
+          // Main content
+          e('div', { className: 'flex-1 p-8 overflow-y-auto' },
+            tab === 'dashboard' && e('div', null,
+              e('h1', { className: 'text-3xl font-bold mb-6' }, 'דשבורד'),
+              e('div', { className: 'grid grid-cols-2 md:grid-cols-4 gap-4 mb-8' },
+                [
+                  { label: 'מחוברים עכשיו', value: online.length, color: 'from-green-600 to-emerald-600' },
+                  { label: 'הודעות היום', value: todayCount, color: 'from-blue-600 to-cyan-600' },
+                  { label: 'סה״כ הודעות', value: messages.length, color: 'from-purple-600 to-pink-600' },
+                  { label: 'משתמשים חסומים', value: bans.length, color: 'from-red-600 to-orange-600' }
+                ].map((stat, i) => e('div', {
+                  key: i,
+                  className: 'bg-gradient-to-br ' + stat.color + ' rounded-2xl p-6'
+                },
+                  e('div', { className: 'text-4xl font-bold' }, stat.value),
+                  e('div', { className: 'text-sm mt-1 opacity-90' }, stat.label)
+                ))
+              ),
+              e('div', { className: 'glass-panel rounded-2xl p-6' },
+                e('h2', { className: 'text-xl font-bold mb-4' }, 'הודעות לפי חדר'),
+                Object.entries(messagesByRoom).map(([room, count]) =>
+                  e('div', { key: room, className: 'flex justify-between py-2 border-b border-white/5' },
+                    e('span', { className: 'text-gray-300' }, room),
+                    e('span', { className: 'font-bold text-red-400' }, count)
+                  )
+                ),
+                Object.keys(messagesByRoom).length === 0 && e('div', { className: 'text-gray-500 text-center py-4' }, 'אין עדיין הודעות')
+              )
+            ),
+
+            tab === 'messages' && e('div', null,
+              e('h1', { className: 'text-3xl font-bold mb-6' }, 'כל ההודעות'),
+              messages.length === 0 && e('div', { className: 'text-gray-500 text-center py-12' }, 'אין הודעות'),
+              e('div', { className: 'space-y-2' },
+                messages.map(msg => e('div', {
+                  key: msg._firestoreId,
+                  className: 'glass-panel rounded-xl p-4 flex items-start justify-between gap-4'
+                },
+                  e('div', { className: 'flex-1' },
+                    e('div', { className: 'flex items-center gap-2 mb-1' },
+                      e('span', { className: 'font-bold text-red-400' }, msg.user || '?'),
+                      msg.realUser && msg.realUser !== msg.user &&
+                        e('span', { className: 'text-gray-500 text-xs' }, '(' + msg.realUser + ')'),
+                      e('span', { className: 'text-gray-500 text-xs' }, '·'),
+                      e('span', { className: 'text-gray-400 text-xs' }, msg.room),
+                      e('span', { className: 'text-gray-500 text-xs' }, '·'),
+                      e('span', { className: 'text-gray-500 text-xs' }, msg.timestamp)
+                    ),
+                    e('div', { className: 'text-white break-words' }, msg.text)
+                  ),
+                  e('div', { className: 'flex flex-col gap-2 flex-shrink-0' },
+                    e('button', {
+                      onClick: () => confirmDelete(msg),
+                      className: 'px-3 py-1.5 bg-red-600/20 hover:bg-red-600 text-red-200 hover:text-white rounded-lg text-xs transition-all',
+                      title: 'מחק הודעה'
+                    }, '🗑️ מחק'),
+                    (msg.realUser || msg.user) && e('button', {
+                      onClick: () => confirmBan(msg),
+                      className: 'px-3 py-1.5 bg-orange-600/20 hover:bg-orange-600 text-orange-200 hover:text-white rounded-lg text-xs transition-all',
+                      title: 'חסום את המשתמש'
+                    }, '🚫 חסום')
+                  )
+                ))
+              )
+            ),
+
+            tab === 'online' && e('div', null,
+              e('h1', { className: 'text-3xl font-bold mb-6' }, 'משתמשים מחוברים עכשיו'),
+              online.length === 0 && e('div', { className: 'text-gray-500 text-center py-12' }, 'אין משתמשים מחוברים כרגע'),
+              e('div', { className: 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4' },
+                online.map(user => e('div', {
+                  key: user._id,
+                  className: 'glass-panel rounded-xl p-5'
+                },
+                  e('div', { className: 'flex items-center gap-3 mb-3' },
+                    e('div', { className: 'w-3 h-3 bg-green-500 rounded-full animate-pulse' }),
+                    e('div', { className: 'font-bold text-lg' }, user.nickname)
+                  ),
+                  e('div', { className: 'flex gap-2' },
+                    e('button', {
+                      onClick: () => confirmKick(user.nickname),
+                      className: 'flex-1 px-3 py-2 bg-yellow-600/20 hover:bg-yellow-600 text-yellow-200 hover:text-white rounded-lg text-sm transition-all'
+                    }, '👢 בעט'),
+                    e('button', {
+                      onClick: () => confirmBan(user),
+                      className: 'flex-1 px-3 py-2 bg-red-600/20 hover:bg-red-600 text-red-200 hover:text-white rounded-lg text-sm transition-all'
+                    }, '🚫 חסום')
+                  )
+                ))
+              )
+            ),
+
+            tab === 'bans' && e('div', null,
+              e('h1', { className: 'text-3xl font-bold mb-6' }, 'משתמשים חסומים'),
+              bans.length === 0 && e('div', { className: 'text-gray-500 text-center py-12' }, 'אין חסומים'),
+              e('div', { className: 'space-y-2' },
+                bans.map(ban => e('div', {
+                  key: ban._id,
+                  className: 'glass-panel rounded-xl p-4 flex items-center justify-between'
+                },
+                  e('div', null,
+                    e('div', { className: 'font-bold text-lg' }, ban.nickname),
+                    ban.reason && e('div', { className: 'text-gray-400 text-sm mt-1' }, 'סיבה: ' + ban.reason)
+                  ),
+                  e('button', {
+                    onClick: () => confirmUnban(ban.nickname),
+                    className: 'px-4 py-2 bg-green-600/20 hover:bg-green-600 text-green-200 hover:text-white rounded-lg text-sm transition-all'
+                  }, '✓ בטל חסימה')
+                ))
+              )
+            )
+          )
+        );
+      }
+
+      // ─── App shell ────────────────────────────────────────────────
+      function AdminApp() {
+        const [loggedIn, setLoggedIn] = useState(() => {
+          try { return sessionStorage.getItem('admin_ok') === '1'; } catch(e) { return false; }
+        });
+        return loggedIn ? e(AdminDashboard) : e(AdminLogin, { onSuccess: () => setLoggedIn(true) });
+      }
+
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      root.render(e(AdminApp));
+    });
+  </script>
+</body>
+</html>
