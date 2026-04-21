@@ -951,7 +951,7 @@ const BDSMChat = () => {
   const [privateNotifications, setPrivateNotifications] = useState({}); // { senderNick: unreadCount }
   const [toastNotification, setToastNotification] = useState(null); // { from, text, id }
   const [seenPrivateMsgIds, setSeenPrivateMsgIds] = useState(new Set());
-  const prevPrivateMsgsRef = React.useRef([]);
+  const prevPrivateMsgsRef = useRef([]);
 
   useEffect(() => {
     if (!isLoggedIn || !currentUser) return;
