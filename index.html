@@ -307,6 +307,22 @@
       };
 
       // Subscribe to pinned message (admin can pin one message for everyone)
+      // Subscribe to rooms from Firebase (admin can add/remove)
+      window.fbSubscribeRooms = (callback) => {
+        return onSnapshot(collection(db, 'chatRooms'), (snap) => {
+          const rooms = snap.docs.map(d => Object.assign({}, d.data(), { _id: d.id }));
+          rooms.sort((a,b) => (a.order||99)-(b.order||99));
+          callback(rooms);
+        }, () => callback([]));
+      };
+
+      // Subscribe to party announcement
+      window.fbSubscribeParty = (callback) => {
+        return onSnapshot(doc(db, 'chatSettings', 'party'), (snap) => {
+          callback(snap.exists() ? snap.data() : null);
+        }, () => callback(null));
+      };
+
       window.fbSubscribePinned = (callback) => {
         return onSnapshot(doc(db, 'chatPinned', 'current'), (snap) => {
           callback(snap.exists() ? snap.data() : null);
@@ -538,34 +554,17 @@ const BDSMChat = () => {
   }]);
 
   // Chat State
-  const [currentView, setCurrentView] = useState('chat'); // 'chat', 'admin', 'private'
+  const [currentView, setCurrentView] = useState('chat');
   const [currentRoom, setCurrentRoom] = useState('כללי');
-  const [rooms, setRooms] = useState([{
-    id: 1,
-    name: 'כללי',
-    icon: '💬',
-    description: 'שיחות כלליות'
-  }, {
-    id: 2,
-    name: 'מסיבות',
-    icon: '🎉',
-    description: 'ארגון מסיבות'
-  }, {
-    id: 3,
-    name: 'שיבארי',
-    icon: '🪢',
-    description: 'אומנות הקשירה'
-  }, {
-    id: 4,
-    name: 'סשנים',
-    icon: '⛓️',
-    description: 'סשנים וחוויות'
-  }, {
-    id: 5,
-    name: 'פמדום',
-    icon: '👑',
-    description: 'נשים שולטות'
-  }]);
+  const DEFAULT_ROOMS = [
+    { id:1, name:'כללי',   icon:'💬', description:'שיחות כלליות' },
+    { id:2, name:'מסיבות', icon:'🎉', description:'ארגון מסיבות' },
+    { id:3, name:'שיבארי', icon:'🪢', description:'אומנות הקשירה' },
+    { id:4, name:'סשנים',  icon:'⛓️', description:'סשנים וחוויות' },
+    { id:5, name:'פמדום',  icon:'👑', description:'נשים שולטות' },
+  ];
+  const [rooms, setRooms] = useState(DEFAULT_ROOMS);
+  const [firebaseRooms, setFirebaseRooms] = useState([]);
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -664,8 +663,7 @@ const BDSMChat = () => {
   const EMOJIS = ['😀','😂','😍','🥰','😎','😭','😅','🤔','😏','🥺','😈','❤️','🔥','👍','👎','💪','🙏','🎉','✨','💋','⛓️','🪢','🎭','👑','🌹','🔞','💦','🍑','😈','🖤','💀','🤫','😮','🫦','🥵','😤','💯','🎯','⚡','🕷️'];
 
   // Party Announcements
-  const [showPartyAnnouncement, setShowPartyAnnouncement] = useState(false);
-  const [partyAnnouncementText, setPartyAnnouncementText] = useState('');
+  // Party announcement controlled by admin via Firebase
 
   // Admin Reports & Logs
   const [reports, setReports] = useState([]);
@@ -708,28 +706,10 @@ const BDSMChat = () => {
     }
   };
 
-  // Check if it's party day (Thursday or Friday)
-  useEffect(() => {
-    const checkPartyDay = () => {
-      const today = new Date().getDay(); // 0 = Sunday, 4 = Thursday, 5 = Friday
-
-      if (today === 4) {
-        // Thursday
-        setShowPartyAnnouncement(true);
-        setPartyAnnouncementText('🎉 מסיבת קהילה הערב! הצטרפו אלינו למסיבה הכי שווה של השבוע!');
-      } else if (today === 5) {
-        // Friday
-        setShowPartyAnnouncement(true);
-        setPartyAnnouncementText('🔥 ערב שישי של אש! מסיבה מיוחדת הערב - אל תפספסו!');
-      } else {
-        setShowPartyAnnouncement(false);
-      }
-    };
-    checkPartyDay();
-    // Check again every hour in case day changes
-    const interval = setInterval(checkPartyDay, 3600000);
-    return () => clearInterval(interval);
-  }, []);
+  // Party announcement now comes from Firebase (set by admin)
+  const showPartyAnnouncement = !!(liveParty && liveParty.active && (liveParty.text || liveParty.date));
+  const partyAnnouncementText = liveParty ? (liveParty.text || '') : '';
+  const partyDate = liveParty ? (liveParty.date || '') : '';
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const localStreamRef = useRef(null);
@@ -983,6 +963,43 @@ const BDSMChat = () => {
       window.removeEventListener('pagehide', handlePageHide);
     };
   }, [isLoggedIn, currentUser]);
+
+  // LIVE: subscribe to Firebase rooms (admin can add/remove)
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    let unsub = null, cancelled = false;
+    const tryStart = () => {
+      if (cancelled) return;
+      if (typeof window.fbSubscribeRooms === 'function') {
+        unsub = window.fbSubscribeRooms(fbRooms => {
+          if (!cancelled) {
+            if (fbRooms && fbRooms.length > 0) {
+              setRooms(fbRooms.map((r,i) => ({id:r._id||i, name:r.name, icon:r.icon||'💬', description:r.description||''})));
+            } else {
+              setRooms(DEFAULT_ROOMS);
+            }
+          }
+        });
+      } else setTimeout(tryStart, 300);
+    };
+    tryStart();
+    return () => { cancelled = true; if (typeof unsub === 'function') unsub(); };
+  }, [isLoggedIn]);
+
+  // LIVE: party announcement from Firebase
+  const [liveParty, setLiveParty] = useState(null);
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    let unsub = null, cancelled = false;
+    const tryStart = () => {
+      if (cancelled) return;
+      if (typeof window.fbSubscribeParty === 'function') {
+        unsub = window.fbSubscribeParty(p => { if (!cancelled) setLiveParty(p); });
+      } else setTimeout(tryStart, 300);
+    };
+    tryStart();
+    return () => { cancelled = true; if (typeof unsub === 'function') unsub(); };
+  }, [isLoggedIn]);
 
   // LIVE: subscribe to list of online users (chatNicknames collection)
   const [liveOnlineUsers, setLiveOnlineUsers] = useState([]);
