@@ -616,6 +616,9 @@ const BDSMChat = () => {
         if (raw) storedUser = JSON.parse(raw);
       } catch (e) {/* ignore */}
       if (storedUser && storedUser.id && storedUser.username) {
+        // Force role to 'user' — this chat page never shows admin UI.
+        // Admin management happens on /admin (separate page, separate login).
+        storedUser.role = 'user';
         // Make sure they're still not banned
         if (typeof window.fbCheckBanned === 'function') {
           window.fbCheckBanned(storedUser.username).then(isBanned => {
@@ -1162,12 +1165,7 @@ const BDSMChat = () => {
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => setCurrentView('chat'),
     className: `flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-all ${currentView === 'chat' ? 'bg-red-600' : 'bg-black/50 hover:bg-black/70'}`
-  }, "\u05E6'\u05D0\u05D8"), currentUser.role === 'admin' && /*#__PURE__*/React.createElement("button", {
-    onClick: () => setCurrentView('admin'),
-    className: `flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-1 ${currentView === 'admin' ? 'bg-red-600' : 'bg-black/50 hover:bg-black/70'}`
-  }, /*#__PURE__*/React.createElement(Shield, {
-    className: "w-4 h-4"
-  }), "\u05E0\u05D9\u05D4\u05D5\u05DC")), !isGuest && /*#__PURE__*/React.createElement("button", {
+  }, "\u05E6'\u05D0\u05D8")), !isGuest && /*#__PURE__*/React.createElement("button", {
     onClick: () => setShowMaskSelector(!showMaskSelector),
     className: `w-full px-4 py-3 rounded-xl mb-4 transition-all flex items-center justify-center gap-2 font-medium ${maskMode ? `bg-gradient-to-r ${selectedMask?.color} text-white shadow-lg` : 'bg-purple-600/20 hover:bg-purple-600/40 border border-purple-500/30 text-purple-300'}`
   }, /*#__PURE__*/React.createElement("span", {
