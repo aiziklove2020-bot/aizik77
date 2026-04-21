@@ -650,9 +650,10 @@ const BDSMChat = () => {
 
   // Show/Hide Users Sidebar
   const [showUsersSidebar, setShowUsersSidebar] = useState(false);
-  // Keep refs in sync so useEffect closures always read current values
-  useEffect(() => { currentViewRef.current = currentView; }, [currentView]);
-  useEffect(() => { activePmRef.current = activePrivateChat; }, [activePrivateChat]);
+  // Always keep window globals updated for use inside Firebase callbacks
+  window.__chatCurrentView = currentView;
+  window.__chatActivePm = activePrivateChat;
+
   // Emoji picker & image upload
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showPrivateEmojiPicker, setShowPrivateEmojiPicker] = useState(false);
@@ -1015,8 +1016,6 @@ const BDSMChat = () => {
   const [pmUnread, setPmUnread] = useState({});
   const [pmToast, setPmToast] = useState(null);
   const prevPmRef = useRef([]);
-  const currentViewRef = useRef('chat');
-  const activePmRef = useRef(null);
 
   useEffect(() => {
     if (!isLoggedIn || !currentUser) return;
@@ -1035,7 +1034,7 @@ const BDSMChat = () => {
                 var u = Object.assign({}, prev);
                 newIn.forEach(function(m){
                   // don't count unread if currently in that chat
-                  if (!(currentViewRef.current === 'private' && activePmRef.current === m.from)) {
+                  if (!(window.__chatCurrentView === 'private' && window.__chatActivePm === m.from)) {
                     u[m.from] = (u[m.from] || 0) + 1;
                   }
                 });
@@ -1043,7 +1042,7 @@ const BDSMChat = () => {
               });
               var latest = newIn[newIn.length - 1];
               // only show toast if NOT currently in that private chat
-              if (!(currentViewRef.current === 'private' && activePmRef.current === latest.from)) {
+              if (!(window.__chatCurrentView === 'private' && window.__chatActivePm === latest.from)) {
                 setPmToast({ from: latest.from, text: latest.text, id: latest._firestoreId });
               }
               try {
