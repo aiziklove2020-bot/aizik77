@@ -2087,7 +2087,7 @@ const BDSMChat = () => {
     }
     return msgs.map(msg => /*#__PURE__*/React.createElement("div", {
       key: msg._firestoreId || msg.from + msg.timestamp,
-      className: `flex justify-end`
+      className: `flex justify-start`
     }, /*#__PURE__*/React.createElement("div", {
       className: `${msg.imageUrl ? '' : 'px-4 md:px-5 py-2 md:py-3'} rounded-2xl max-w-[85%] md:max-w-xl ${msg.from === currentUser.username ? (msg.imageUrl ? '' : 'bg-red-600') : (msg.imageUrl ? '' : 'bg-black/60 border border-red-600/20')}`
     }, msg.imageUrl ? React.createElement("div", {style:{textAlign: msg.from === currentUser.username ? "right" : "left"}},
