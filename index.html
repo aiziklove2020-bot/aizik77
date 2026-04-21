@@ -385,6 +385,47 @@
         });
       };
 
+
+  // ── Sound helpers ─────────────────────────────────────
+  window.__audioCtx = null;
+  window.__audioUnlocked = false;
+
+  window.playSound = function(type) {
+    try {
+      if (!window.__audioCtx) window.__audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      var ctx = window.__audioCtx;
+      if (ctx.state === 'suspended') ctx.resume();
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      if (type === 'send') {
+        // Short click sound for sending
+        osc.frequency.setValueAtTime(600, ctx.currentTime);
+        osc.frequency.setValueAtTime(800, ctx.currentTime + 0.05);
+        gain.gain.setValueAtTime(0.1, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
+        osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.15);
+      } else if (type === 'receive') {
+        // Two-tone notification
+        osc.frequency.setValueAtTime(880, ctx.currentTime);
+        osc.frequency.setValueAtTime(660, ctx.currentTime + 0.1);
+        gain.gain.setValueAtTime(0.15, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+        osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.3);
+      }
+    } catch(e) {}
+  };
+
+  // Unlock audio on first touch (iOS requirement)
+  document.addEventListener('touchstart', function unlock() {
+    try {
+      if (!window.__audioCtx) window.__audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (window.__audioCtx.state === 'suspended') window.__audioCtx.resume();
+      window.__audioUnlocked = true;
+    } catch(e) {}
+    document.removeEventListener('touchstart', unlock);
+  }, { once: true });
+
       window.firebaseReady = true;
       window.dispatchEvent(new Event('firebase-ready'));
       log('🔥 Firebase מוכן - הצ\'אט מחובר!', 'ok');
@@ -1061,7 +1102,7 @@ const BDSMChat = () => {
               var latest = newIn[newIn.length-1];
               if (!(window.__cv==='private'&&window.__apm===latest.from)) {
                 setPmToast({from:latest.from,text:latest.text,id:latest._firestoreId});
-                try { var ctx=new(window.AudioContext||window.webkitAudioContext)();var osc=ctx.createOscillator();var gain=ctx.createGain();osc.connect(gain);gain.connect(ctx.destination);osc.frequency.setValueAtTime(880,ctx.currentTime);osc.frequency.setValueAtTime(660,ctx.currentTime+0.1);gain.gain.setValueAtTime(0.15,ctx.currentTime);gain.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.3);osc.start(ctx.currentTime);osc.stop(ctx.currentTime+0.3); } catch(e) {}
+                if (typeof window.playSound === 'function') window.playSound('receive');
               }
             }
             prevPmRef.current = msgs;
@@ -1205,6 +1246,7 @@ const BDSMChat = () => {
       }
       try {
         await window.fbSendMessage(userMsg);
+        if (typeof window.playSound === 'function') window.playSound('send');
       } catch (error) {
         console.error('Failed to send message:', error);
         alert('שגיאה בשליחת ההודעה: ' + (error.message || String(error)));
@@ -1226,6 +1268,7 @@ const BDSMChat = () => {
           text: text,
           timestamp: new Date().toLocaleTimeString('he-IL')
         });
+        if (typeof window.playSound === 'function') window.playSound('send');
       } else {
         alert('המערכת עוד טוענת, נסה שוב');
         setPrivateMessage(text);
@@ -1825,7 +1868,6 @@ const BDSMChat = () => {
     className: "bg-black/70 backdrop-blur-md border-t border-red-600/30 px-3 md:px-8 py-3 md:py-5 pb-safe"
   },
   showEmojiPicker && React.createElement("div",{style:{display:"flex",flexWrap:"wrap",gap:"6px",padding:"10px",background:"#111",borderRadius:"12px",marginBottom:"8px",maxHeight:"150px",overflowY:"auto"}},EMOJIS.map(function(em){return React.createElement("button",{key:em,onClick:function(){setNewMessage(function(p){return p+em;});setShowEmojiPicker(false);},style:{fontSize:"22px",background:"none",border:"none",cursor:"pointer",padding:"2px"}},em);})),
-  React.createElement("input",{type:"file",accept:"image/*",ref:fileInputRef,style:{display:"none"},onChange:function(ev){handleImageUpload(ev.target.files[0],false);ev.target.value="";}}),
   /*#__PURE__*/React.createElement("div", {
     className: "flex gap-2 md:gap-3"
   }, /*#__PURE__*/React.createElement("button", {
@@ -1835,7 +1877,7 @@ const BDSMChat = () => {
   }, /*#__PURE__*/React.createElement(Send, {
     className: "w-5 h-5"
   })), React.createElement("button",{onClick:function(){setShowEmojiPicker(function(p){return !p;});},className:"px-3 py-3 bg-black/50 border border-red-600/30 rounded-xl hover:bg-black/70 flex-shrink-0",style:{fontSize:"20px"}},"😀"),
-  React.createElement("button",{onClick:function(){fileInputRef.current&&fileInputRef.current.click();},className:"px-3 py-3 bg-black/50 border border-red-600/30 rounded-xl hover:bg-black/70 flex-shrink-0",style:{fontSize:"20px"}},"📷"),
+  React.createElement("label",{className:"px-3 py-3 bg-black/50 border border-red-600/30 rounded-xl hover:bg-black/70 flex-shrink-0 cursor-pointer",style:{fontSize:"20px",display:"flex",alignItems:"center",justifyContent:"center"}},"📷",React.createElement("input",{type:"file",accept:"image/*,image/heic,image/heif",capture:"environment",style:{display:"none"},onChange:function(ev){handleImageUpload(ev.target.files[0],false);ev.target.value="";}})),
   /*#__PURE__*/React.createElement("input", {
     type: "text",
     placeholder: "\u05D4\u05E7\u05DC\u05D3 \u05D4\u05D5\u05D3\u05E2\u05D4...",
@@ -2078,7 +2120,6 @@ const BDSMChat = () => {
     className: "bg-black/70 backdrop-blur-md border-t border-red-600/30 px-3 md:px-8 py-3 md:py-5"
   },
   showPrivateEmojiPicker && React.createElement("div",{style:{display:"flex",flexWrap:"wrap",gap:"6px",padding:"10px",background:"#111",borderRadius:"12px",marginBottom:"8px",maxHeight:"150px",overflowY:"auto"}},EMOJIS.map(function(em){return React.createElement("button",{key:em,onClick:function(){setPrivateMessage(function(p){return p+em;});setShowPrivateEmojiPicker(false);},style:{fontSize:"22px",background:"none",border:"none",cursor:"pointer",padding:"2px"}},em);})),
-  React.createElement("input",{type:"file",accept:"image/*",ref:privateFileInputRef,style:{display:"none"},onChange:function(ev){handleImageUpload(ev.target.files[0],true);ev.target.value="";}}),
   /*#__PURE__*/React.createElement("div", {
     className: "flex gap-2 md:gap-3"
   }, /*#__PURE__*/React.createElement("button", {
@@ -2087,7 +2128,7 @@ const BDSMChat = () => {
   }, /*#__PURE__*/React.createElement(Send, {
     className: "w-5 h-5"
   })), React.createElement("button",{onClick:function(){setShowPrivateEmojiPicker(function(p){return !p;});},className:"px-3 py-3 bg-black/50 border border-red-600/30 rounded-xl hover:bg-black/70 flex-shrink-0",style:{fontSize:"20px"}},"😀"),
-  React.createElement("button",{onClick:function(){privateFileInputRef.current&&privateFileInputRef.current.click();},className:"px-3 py-3 bg-black/50 border border-red-600/30 rounded-xl hover:bg-black/70 flex-shrink-0",style:{fontSize:"20px"}},"📷"),
+  React.createElement("label",{className:"px-3 py-3 bg-black/50 border border-red-600/30 rounded-xl hover:bg-black/70 flex-shrink-0 cursor-pointer",style:{fontSize:"20px",display:"flex",alignItems:"center",justifyContent:"center"}},"📷",React.createElement("input",{type:"file",accept:"image/*,image/heic,image/heif",capture:"environment",style:{display:"none"},onChange:function(ev){handleImageUpload(ev.target.files[0],true);ev.target.value="";}})),
   /*#__PURE__*/React.createElement("input", {
     type: "text",
     placeholder: `הודעה פרטית ל-${activePrivateChat}...`,
