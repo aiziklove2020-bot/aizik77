@@ -998,11 +998,19 @@ const BDSMChat = () => {
             if (newIn.length > 0) {
               setPmUnread(function(prev) {
                 var u = Object.assign({}, prev);
-                newIn.forEach(function(m){ u[m.from] = (u[m.from] || 0) + 1; });
+                newIn.forEach(function(m){
+                  // don't count unread if currently in that chat
+                  if (!(currentView === 'private' && activePrivateChat === m.from)) {
+                    u[m.from] = (u[m.from] || 0) + 1;
+                  }
+                });
                 return u;
               });
               var latest = newIn[newIn.length - 1];
-              setPmToast({ from: latest.from, text: latest.text, id: latest._firestoreId });
+              // only show toast if NOT currently in that private chat
+              if (!(currentView === 'private' && activePrivateChat === latest.from)) {
+                setPmToast({ from: latest.from, text: latest.text, id: latest._firestoreId });
+              }
               try {
                 var ctx = new (window.AudioContext || window.webkitAudioContext)();
                 var osc = ctx.createOscillator(); var gain = ctx.createGain();
