@@ -3,14 +3,14 @@ import { getFirestore, enableIndexedDbPersistence } from 'firebase/firestore'
 import { getAuth } from 'firebase/auth'
 import { getStorage } from 'firebase/storage'
 
-// עדכן את זה עם ה-credentials שלך מ-Firebase Console
 const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_AUTH_DOMAIN",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_STORAGE_BUCKET",
-  messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
-  appId: "YOUR_APP_ID"
+  apiKey: "AIzaSyB68Fc2bI9uhOYhnY4zAW3jtGkIGY08cjY",
+  authDomain: "portal-22619.firebaseapp.com",
+  projectId: "portal-22619",
+  storageBucket: "portal-22619.firebasestorage.app",
+  messagingSenderId: "935750060994",
+  appId: "1:935750060994:web:301abb24b3d5de90a0645b",
+  measurementId: "G-F8EJ4Q3JFS"
 }
 
 const app = initializeApp(firebaseConfig)
