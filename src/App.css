@@ -16,7 +16,39 @@ body {
 
 .app {
   min-height: 100vh;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #f5f7fa;
+}
+
+.public-header {
+  background: white;
+  padding: 1.5rem 2rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  margin-bottom: 2rem;
+}
+
+.public-header h1 {
+  color: #667eea;
+  font-size: 1.8rem;
+}
+
+.login-header-btn {
+  background: #667eea;
+  color: white;
+  border: none;
+  padding: 0.7rem 1.5rem;
+  border-radius: 25px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: all 0.3s ease;
+}
+
+.login-header-btn:hover {
+  background: #5568d3;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
 }
 
 .app-header {
@@ -32,6 +64,17 @@ body {
 .app-header h1 {
   color: #667eea;
   font-size: 1.8rem;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+}
+
+.user-email {
+  color: #666;
+  font-size: 0.9rem;
 }
 
 .logout-btn {
@@ -57,5 +100,5 @@ body {
   align-items: center;
   min-height: 60vh;
   font-size: 1.2rem;
-  color: white;
+  color: #667eea;
 }

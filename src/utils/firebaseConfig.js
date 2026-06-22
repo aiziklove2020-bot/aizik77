@@ -9,8 +9,8 @@ const firebaseConfig = {
   projectId: "portal-22619",
   storageBucket: "portal-22619.firebasestorage.app",
   messagingSenderId: "935750060994",
-  appId: "1:935750060994:web:301abb24b3d5de90a0645b",
-  measurementId: "G-F8EJ4Q3JFS"
+  appId: "1:935750060994:web:de7891160cb434b8a0645b",
+  measurementId: "G-SQPG0SLKZP"
 }
 
 const app = initializeApp(firebaseConfig)
